@@ -1,0 +1,11 @@
+[package]
+name = "lazyvial"
+version = "0.1.0"
+edition = "2021"
+description = "Remap a Vial keyboard from the terminal"
+
+[dependencies]
+crossterm = "0.28"
+hidapi = "2"
+serde_json = "1"
+xz2 = "0.1"

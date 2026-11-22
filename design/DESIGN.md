@@ -87,7 +87,7 @@ The cap token is the keycode legend. `KC_NO` prints `NO`. `KC_ESC` prints `Esc`.
   "matrix": { "rows": 2, "cols": 2 },
   "layouts": {
     "labels": [["Side", "Shown", "Hid"]],
-    "keymap": [["0,0", "0,1\nHid\n\n\n\n\n\n\n\n0,1"]]
+    "keymap": [["0,0", "0,1\nHid\n\n\n\n\n\n\n0,1"]]
   }
 }
 ```
