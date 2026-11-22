@@ -189,7 +189,7 @@ None. This sketch has not been implemented.
 - Should quit send vial lock subcommand `0x08`? The sketch sends nothing on quit.
 - For nudge, the sketch picks the nearest selectable center in the facing half-plane, then the smaller perpendicular distance. Decals are not targets. Is that the movement a staggered or split layout should have?
 
-The LZMA settings have to match vial-gui's raw LZMA decode. A mismatch fails every open, including the fake board, because there is one decoder. That failure is loud. It is still the first integration risk.
+The definition container is XZ. `vial_generate_definition.py` calls `lzma.compress` with no format argument, and that default is the XZ container, whose first bytes are `fd 7z XZ`. vial-gui calls `lzma.decompress`, which accepts that container. One decoder serves the fake board and a real board. A different container fails every open.
 
 ## Next implementation step
 
