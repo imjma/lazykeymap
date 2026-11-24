@@ -559,7 +559,24 @@ impl Load {
 
     /// One report. `true` once the board is fully read.
     pub(super) fn step(&mut self, candidate: &mut Candidate) -> Result<bool> {
-        let io = candidate.io.as_deref_mut().ok_or(Error::Disconnected)?;
+        self.advance(candidate.io.as_deref_mut().ok_or(Error::Disconnected)?)?;
+        Ok(matches!(self.phase, Phase::Done))
+    }
+
+    /// The keymap, encoders, and lock state are in. Tap dances, combos, and macros can follow
+    /// while the board is already on screen.
+    pub(super) fn ready(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::TapDance(_)
+                | Phase::Combo(_)
+                | Phase::MacroSize
+                | Phase::Macro { .. }
+                | Phase::Done
+        )
+    }
+
+    fn advance(&mut self, io: &mut dyn Io) -> Result<()> {
         self.phase = self.read(io)?;
         self.done += 1;
         // Each count is learned on the way, so the total grows early on. Hold the bar where it
@@ -567,7 +584,7 @@ impl Load {
         self.percent = self
             .percent
             .max(self.done * 100 / self.total().max(self.done));
-        Ok(matches!(self.phase, Phase::Done))
+        Ok(())
     }
 
     /// Reports for the whole board, counting only the parts sized so far.
@@ -850,13 +867,9 @@ impl Load {
         }
     }
 
-    /// The read board. Call after `step` returns `true`.
+    /// The board, once `ready`. What is still unread follows through `Board::read_rest`.
     pub(super) fn finish(mut self, mut candidate: Candidate) -> Board {
-        let def = self.def.take().expect("a finished load has a definition");
-        if self.version >= 2 && self.macros > 0 {
-            self.entries.macros =
-                entries::decode_macros(&self.entries.macro_bytes, usize::from(self.macros));
-        }
+        let def = self.def.take().expect("a ready load has a definition");
         let guard = candidate.guard.clone();
         if let Some(guard) = &guard {
             guard.borrow_mut().open = true;
@@ -865,17 +878,17 @@ impl Load {
             layers: self.layers,
             rows: def.rows_n,
             cols: def.cols_n,
-            matrix: self.matrix,
-            encoders: self.encoders,
+            matrix: std::mem::take(&mut self.matrix),
+            encoders: std::mem::take(&mut self.encoders),
         };
         let saved = Saved {
             matrix: keymap.matrix.clone(),
             encoders: keymap.encoders.clone(),
-            tap_dances: self.entries.tap_dances.clone(),
-            combos: self.entries.combos.clone(),
-            macros: self.entries.macros.clone(),
+            tap_dances: Vec::new(),
+            combos: Vec::new(),
+            macros: Vec::new(),
         };
-        Board {
+        let mut board = Board {
             name: candidate.listing.name.clone(),
             catalog: catalog::merge(
                 &def.custom,
@@ -891,12 +904,15 @@ impl Load {
             locked: !self.unlocked,
             unlock: Vec::new(),
             unlock_left: None,
-            entries: self.entries,
+            entries: Entries::default(),
             saved,
             undo: Vec::new(),
-            io: candidate.io.take().expect("a finished load keeps its io"),
+            io: candidate.io.take().expect("a ready load keeps its io"),
+            rest: Some(self),
             _guard: guard,
-        }
+        };
+        board.settle();
+        board
     }
 }
 
@@ -927,6 +943,9 @@ pub(super) struct Board {
     /// What each staged change replaced, newest last.
     undo: Vec<Write>,
     io: Box<dyn Io>,
+    /// Tap dances, combos, and macros still being read after the board opened. Their tabs
+    /// appear once this is `None`.
+    rest: Option<Load>,
     /// Clears `Store.open` on drop when this board came from a fake.
     _guard: Option<Arc<RefCell<Store>>>,
 }
@@ -936,6 +955,43 @@ impl Drop for Board {
         if let Some(guard) = &self._guard {
             guard.borrow_mut().open = false;
         }
+    }
+}
+
+impl Board {
+    /// One more report of the entries still unread. `true` once there is nothing left to read.
+    pub(super) fn read_rest(&mut self) -> Result<bool> {
+        let Some(load) = &mut self.rest else {
+            return Ok(true);
+        };
+        load.advance(&mut *self.io)?;
+        self.settle();
+        Ok(self.rest.is_none())
+    }
+
+    /// What the background read is on, while it runs.
+    pub(super) fn rest_progress(&self) -> Option<Progress> {
+        self.rest.as_ref().map(Load::progress)
+    }
+
+    /// Takes the entries once the load has read them all. They arrive matching the keyboard.
+    fn settle(&mut self) {
+        if !self
+            .rest
+            .as_ref()
+            .is_some_and(|load| matches!(load.phase, Phase::Done))
+        {
+            return;
+        }
+        let mut load = self.rest.take().expect("checked above");
+        if load.version >= 2 && load.macros > 0 {
+            load.entries.macros =
+                entries::decode_macros(&load.entries.macro_bytes, usize::from(load.macros));
+        }
+        self.saved.tap_dances.clone_from(&load.entries.tap_dances);
+        self.saved.combos.clone_from(&load.entries.combos);
+        self.saved.macros.clone_from(&load.entries.macros);
+        self.entries = load.entries;
     }
 }
 
@@ -1930,6 +1986,7 @@ impl Board {
                 active,
                 locked: Some(self.locked),
                 unsaved: self.pending().len(),
+                loading: self.rest_progress().map(|progress| progress.what),
             },
             mode: paint.mode,
             hold: paint.hold.map(|prompt| self.hold_line(prompt)),
@@ -2494,6 +2551,7 @@ pub(super) fn pick_text(
                 active: 0,
                 locked: None,
                 unsaved: 0,
+                loading: None,
             },
             mode,
             hold: None,

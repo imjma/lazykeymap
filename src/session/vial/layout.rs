@@ -240,6 +240,8 @@ pub(super) struct Header {
     /// `Some(true)` locked, `Some(false)` unlocked, `None` before a board is open.
     pub(super) locked: Option<bool>,
     pub(super) unsaved: usize,
+    /// What is still being read after the board opened, as `tap dances 5/32`.
+    pub(super) loading: Option<String>,
 }
 
 /// What the keys do right now, as a badge: browsing, typing, or waiting on the keyboard.
@@ -359,6 +361,9 @@ fn header_line(header: &Header, cols: usize) -> String {
         seg(format!(" {} ", header.name), BAR, TEXT, true),
     ];
     let mut right = Vec::new();
+    if let Some(loading) = &header.loading {
+        right.push(seg(format!(" ◌ reading {loading} "), BAR, DIM, false));
+    }
     if header.unsaved > 0 {
         right.push(seg(
             format!(" ● {} unsaved ", header.unsaved),
@@ -2067,6 +2072,7 @@ mod tests {
                 active: 0,
                 locked: Some(false),
                 unsaved: 0,
+                loading: None,
             },
             mode: Mode {
                 label: "KEYMAP",

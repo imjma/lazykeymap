@@ -966,13 +966,14 @@ impl Model {
         let until = Instant::now() + SLICE;
         loop {
             match load.step(&mut candidates[cursor]) {
-                Ok(true) => {
+                Ok(_) if load.ready() => {
                     let board = load.finish(candidates.remove(cursor));
+                    let more = board.rest_progress().is_some();
                     self.kind = ModelKind::Map(Session::mapped(board));
-                    return Ok(Step::Continue);
+                    return Ok(if more { Step::Working } else { Step::Continue });
                 }
-                Ok(false) if Instant::now() < until => {}
-                Ok(false) => {
+                Ok(_) if Instant::now() < until => {}
+                Ok(_) => {
                     self.kind = ModelKind::Open {
                         candidates,
                         cursor,
@@ -1171,6 +1172,15 @@ impl Model {
         if matches!(self.kind, ModelKind::Open { .. }) {
             return self.pump();
         }
+        if let Some(board) = reading_board(&mut self.kind) {
+            let until = Instant::now() + SLICE;
+            while !board.read_rest()? {
+                if Instant::now() >= until {
+                    return Ok(Step::Working);
+                }
+            }
+            return Ok(Step::Continue);
+        }
         let kind = mem::replace(&mut self.kind, vacant());
         let (session, back, quit) = match kind {
             ModelKind::Hold {
@@ -1222,6 +1232,21 @@ impl Model {
             HoldStep::Disconnected(err) => return Err(err),
         }
         Ok(Step::Continue)
+    }
+}
+
+/// The open board, for the background read of its entries. Not during an unlock or a save,
+/// whose ticks belong to them.
+fn reading_board(kind: &mut ModelKind) -> Option<&mut vial::Board> {
+    match kind {
+        ModelKind::Map(session)
+        | ModelKind::Sheet { session, .. }
+        | ModelKind::Search { session, .. }
+        | ModelKind::Edit { session, .. }
+        | ModelKind::Ask { session, .. }
+        | ModelKind::Command { session, .. } => Some(&mut session.board),
+        ModelKind::Help { under, .. } => reading_board(under),
+        _ => None,
     }
 }
 

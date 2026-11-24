@@ -103,6 +103,31 @@ fn pick_when_two() -> lazyvial::Result<()> {
 }
 
 #[test]
+fn keymap_opens_before_tap_dances_arrive() -> lazyvial::Result<()> {
+    let board =
+        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.tap_dances(4);
+    let other = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazyvial::App::new(
+        lazyvial::MemoryBoard::choose(&[board, other])?,
+        lazyvial::TestScreen::new(100, 16),
+    );
+    // The keymap is on screen while the tap dances are still being read.
+    assert_eq!(
+        app.handle(lazyvial::Event::Confirm)?,
+        lazyvial::Step::Working
+    );
+    let text = app.screen().text();
+    assert!(text.contains("layer 1/"), "{text}");
+    assert!(text.contains("reading tap dances"), "{text}");
+    assert!(!text.contains("Tap Dance "), "{text}");
+    assert_eq!(app.handle(lazyvial::Event::Tick)?, lazyvial::Step::Continue);
+    let text = app.screen().text();
+    assert!(!text.contains("reading"), "{text}");
+    assert!(text.contains("Tap Dance"), "{text}");
+    Ok(())
+}
+
+#[test]
 fn encoder_writes_clockwise() -> lazyvial::Result<()> {
     let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/encoder.json"))?;
     let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 8));
