@@ -552,22 +552,33 @@ pub(super) fn render_sheet(sheet: &Sheet, frame: Frame<'_>) -> String {
     )
 }
 
-pub(super) fn render_pick(
-    boards: &[super::Candidate],
+pub(super) fn render_pick<'a>(
+    boards: &'a [super::Candidate],
     cursor: usize,
-    failed: Option<usize>,
+    note: super::CardNote<'a>,
     frame: Frame<'_>,
 ) -> String {
     let count = boards.len();
-    let status = vec![seg(
-        format!(
-            "{count} Vial keyboard{} found",
-            if count == 1 { "" } else { "s" }
-        ),
-        BAR,
-        TEXT,
-        false,
-    )];
+    let status = match (&note, boards.get(cursor)) {
+        (super::CardNote::Opening(_), Some(board)) => vec![
+            seg(format!("reading {}", board.listing.name), BAR, TEXT, true),
+            seg(
+                "  ·  Bluetooth takes a few seconds  ·  esc stops",
+                BAR,
+                DIM,
+                false,
+            ),
+        ],
+        _ => vec![seg(
+            format!(
+                "{count} Vial keyboard{} found",
+                if count == 1 { "" } else { "s" }
+            ),
+            BAR,
+            TEXT,
+            false,
+        )],
+    };
     compose(
         Top {
             title: "keyboards",
@@ -575,7 +586,7 @@ pub(super) fn render_pick(
             body: Body::Pick {
                 boards,
                 cursor,
-                failed,
+                note,
             },
         },
         frame,
@@ -595,7 +606,7 @@ enum Body<'a> {
     Pick {
         boards: &'a [super::Candidate],
         cursor: usize,
-        failed: Option<usize>,
+        note: super::CardNote<'a>,
     },
 }
 
@@ -767,11 +778,11 @@ fn board_body(body: &Body<'_>, spent: &Spend, key_cols: u16, key_lines: usize) -
         Body::Pick {
             boards,
             cursor,
-            failed,
+            note,
         } => {
             let above = spent.board_pad / 2;
             out.extend(std::iter::repeat_n(String::new(), above));
-            out.extend(pick_cards(boards, *cursor, *failed, usize::from(key_cols)));
+            out.extend(pick_cards(boards, *cursor, note, usize::from(key_cols)));
             out.extend(std::iter::repeat_n(String::new(), spent.board_pad - above));
         }
     }
@@ -901,11 +912,12 @@ fn lower_body(lower: &Lower<'_>, room: usize, width: u16) -> Vec<String> {
 }
 
 /// Two lines per board, a blank line between: name and maker, then USB id and serial.
-/// The cursor's card is lighter and carries an accent bar.
+/// The cursor's card is lighter and carries an accent bar. While it opens, its second line is a
+/// progress bar; a board that would not open says why in place of the maker.
 fn pick_cards(
     boards: &[super::Candidate],
     cursor: usize,
-    failed: Option<usize>,
+    note: &super::CardNote<'_>,
     width: usize,
 ) -> Vec<String> {
     // At most 64 columns, centered, so a wide terminal does not stretch the cards.
@@ -926,10 +938,16 @@ fn pick_cards(
             seg("  ", bg, DIM, false)
         };
         let name = seg(&board.name, bg, TEXT, on);
-        let side = if failed == Some(index) {
-            seg("✕ no Vial layout ", bg, UNLOCK, true)
-        } else {
-            seg(format!("{} ", board.maker), bg, DIM, false)
+        let opening = match note {
+            super::CardNote::Opening(progress) if on => Some(progress),
+            _ => None,
+        };
+        let side = match note {
+            super::CardNote::Failed(at, why) if *at == index => {
+                seg(format!("✕ {why} "), bg, UNLOCK, true)
+            }
+            _ if opening.is_some() => seg("opening… ", bg, SELECTED_BG, true),
+            _ => seg(format!("{} ", board.maker), bg, DIM, false),
         };
         let ids = [board.usb.as_str(), board.serial.as_str()]
             .into_iter()
@@ -943,10 +961,25 @@ fn pick_cards(
             "{pad}{}",
             fill_line(&[edge.clone(), name], &[side], inner, bg)
         ));
-        out.push(format!(
-            "{pad}{}",
-            fill_line(&[edge, seg(ids, bg, DIM, false)], &[], inner, bg)
-        ));
+        let detail = match opening {
+            Some(progress) => {
+                let cells = 16;
+                let filled = progress.percent.min(100) * cells / 100;
+                vec![
+                    edge,
+                    seg("▰".repeat(filled), bg, SELECTED_BG, false),
+                    seg("▱".repeat(cells - filled), bg, DIM, false),
+                    seg(
+                        format!("  {}%  {}", progress.percent, progress.what),
+                        bg,
+                        TEXT,
+                        false,
+                    ),
+                ]
+            }
+            None => vec![edge, seg(ids, bg, DIM, false)],
+        };
+        out.push(format!("{pad}{}", fill_line(&detail, &[], inner, bg)));
     }
     out
 }

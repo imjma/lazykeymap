@@ -458,61 +458,11 @@ pub(super) fn enumerate() -> Result<Vec<Candidate>> {
     Ok(found)
 }
 
-/// Id, version, definition, layout dword, layer count, keymap chunks, encoders,
-/// unlock status. Sets `Store.open` when the `Io` is a fake.
-pub(super) fn load(candidate: Candidate) -> Result<Board> {
-    match open_board(candidate) {
-        Ok(board) => Ok(board),
-        Err((err, _)) => Err(err),
-    }
-}
-
-pub(super) fn load_keep(candidate: Candidate) -> std::result::Result<Board, (Error, Candidate)> {
-    open_board(candidate)
-}
-
-fn open_board(mut candidate: Candidate) -> std::result::Result<Board, (Error, Candidate)> {
-    if let Some(guard) = &candidate.guard {
-        if guard.borrow().open {
-            return Err((Error::Busy, candidate));
-        }
-    }
-    let Some(mut io) = candidate.io.take() else {
-        return Err((Error::Disconnected, candidate));
-    };
-    let loaded = match read_board(&mut *io) {
-        Ok(loaded) => loaded,
-        Err(err) => {
-            candidate.io = Some(io);
-            return Err((err, candidate));
-        }
-    };
-    let guard = candidate.guard.clone();
-    if let Some(guard) = &guard {
-        guard.borrow_mut().open = true;
-    }
-    let saved = Saved {
-        matrix: loaded.keymap.matrix.clone(),
-        encoders: loaded.keymap.encoders.clone(),
-        tap_dances: loaded.entries.tap_dances.clone(),
-        combos: loaded.entries.combos.clone(),
-        macros: loaded.entries.macros.clone(),
-    };
-    Ok(Board {
-        name: candidate.listing.name.clone(),
-        def: loaded.def,
-        catalog: loaded.catalog,
-        keymap: loaded.keymap,
-        options: loaded.options,
-        locked: loaded.locked,
-        unlock: Vec::new(),
-        unlock_left: None,
-        entries: loaded.entries,
-        saved,
-        undo: Vec::new(),
-        io,
-        _guard: guard,
-    })
+/// Reads the whole board at once. Sets `Store.open` when the `Io` is a fake.
+pub(super) fn load(mut candidate: Candidate) -> Result<Board> {
+    let mut load = Load::begin(&candidate)?;
+    while !load.step(&mut candidate)? {}
+    Ok(load.finish(candidate))
 }
 
 /// What the keyboard holds, as last read or written. `Board::keymap` and `Board::entries` are the
@@ -525,196 +475,432 @@ struct Saved {
     macros: Vec<Vec<Action>>,
 }
 
-struct Loaded {
-    def: Definition,
-    catalog: Table,
-    keymap: Keymap,
+/// A board read one report per `step`, so the screen can show progress and take Esc between
+/// reports. Over Bluetooth a report takes tens of milliseconds and a board takes a few hundred.
+/// Order: id, dynamic-entry counts, definition, layout dword, layer count, macro count, keymap
+/// chunks, encoders, unlock status, tap dances, combos, macro buffer.
+pub(super) struct Load {
+    phase: Phase,
+    done: usize,
+    percent: usize,
+    version: i32,
+    features: Features,
+    tap_dance: u8,
+    combo: u8,
+    size: u32,
+    compressed: Vec<u8>,
+    def: Option<Definition>,
     options: u32,
-    locked: bool,
+    layers: u8,
+    macros: u8,
+    matrix: Vec<u16>,
+    encoders: Vec<Vec<(u16, u16)>>,
+    unlocked: bool,
     entries: Entries,
 }
 
-fn read_board(io: &mut dyn Io) -> Result<Loaded> {
-    let Reply::Id { version, .. } = exchange(io, &Ask::KeyboardId)? else {
-        return Err(Error::Protocol("keyboard id"));
-    };
-    if !(-1..=6).contains(&version) {
-        return Err(Error::Unsupported { vial: version });
-    }
-    // Vial asks for dynamic entries from protocol 4. Persistent default layer is unconditional from 5.
-    let (features, tap_dance, combo) = if version >= 4 {
-        let Reply::Entries {
-            tap_dance,
-            combo,
-            alt_repeat,
-            flags,
-        } = exchange(io, &Ask::Entries)?
-        else {
-            return Err(Error::Protocol("dynamic entries"));
-        };
-        let features = Features {
-            caps_word: flags & 0x01 != 0,
-            layer_lock: flags & 0x02 != 0,
-            repeat_key: alt_repeat > 0,
-            persistent_default_layer: version >= 5,
-        };
-        (features, tap_dance, combo)
-    } else {
-        (Features::default(), 0, 0)
-    };
-    let Reply::DefSize(size) = exchange(io, &Ask::DefinitionSize)? else {
-        return Err(Error::Protocol("definition size"));
-    };
-    if size == 0 {
-        return Err(Error::NoLayout);
-    }
-    let mut compressed = Vec::with_capacity(size as usize);
-    let mut remaining = size;
-    let mut block = 0u32;
-    while remaining > 0 {
-        let Reply::DefBlock(chunk) = exchange(io, &Ask::Definition { block })? else {
-            return Err(Error::Protocol("definition block"));
-        };
-        // The report is 32 bytes. The last block's tail is padding, so the declared size decides the cut.
-        let take = (remaining as usize).min(32);
-        if chunk.len() < take {
-            return Err(Error::Protocol("definition block"));
-        }
-        compressed.extend_from_slice(&chunk[..take]);
-        remaining -= take as u32;
-        block += 1;
-    }
-    let json = decompress(&compressed)?;
-    let text = String::from_utf8(json).map_err(|_| Error::NoLayout)?;
-    let def = layout::parse(&text)?;
-    let Reply::LayoutOptions(options) = exchange(io, &Ask::LayoutOptions)? else {
-        return Err(Error::Protocol("layout options"));
-    };
-    let Reply::LayerCount(layers) = exchange(io, &Ask::LayerCount)? else {
-        return Err(Error::Protocol("layer count"));
-    };
-    let Reply::MacroCount(macros) = exchange(io, &Ask::MacroCount)? else {
-        return Err(Error::Protocol("macro count"));
-    };
-    let rows = def.rows_n;
-    let cols = def.cols_n;
-    let cells = cell_count(layers, rows, cols)?;
-    let mut matrix = vec![0u16; cells];
-    let byte_len = cells.checked_mul(2).ok_or(Error::Protocol("keymap size"))?;
-    let mut offset = 0usize;
-    while offset < byte_len {
-        let len = (byte_len - offset).min(CHUNK as usize) as u8;
-        let offset_u16 = u16::try_from(offset).map_err(|_| Error::Protocol("keymap size"))?;
-        let Reply::Chunk(chunk) = exchange(
-            io,
-            &Ask::KeymapChunk {
-                offset: offset_u16,
-                len,
-            },
-        )?
-        else {
-            return Err(Error::Protocol("keymap chunk"));
-        };
-        if chunk.len() < len as usize {
-            return Err(Error::Protocol("keymap chunk"));
-        }
-        for index in 0..(len as usize / 2) {
-            let byte = index * 2;
-            let code = u16::from_be_bytes([chunk[byte], chunk[byte + 1]]);
-            let cell_index = (offset / 2) + index;
-            if cell_index < matrix.len() {
-                matrix[cell_index] = code;
-            }
-        }
-        offset += len as usize;
-    }
-    let encoder_count = layout::encoder_count(&def);
-    let mut encoders = vec![vec![(0u16, 0u16); encoder_count]; layers as usize];
-    for layer in 0..layers {
-        for index in 0..encoder_count {
-            let Reply::Encoder { cw, ccw } = exchange(
-                io,
-                &Ask::GetEncoder {
-                    layer,
-                    index: index as u8,
-                },
-            )?
-            else {
-                return Err(Error::Protocol("encoder"));
-            };
-            encoders[layer as usize][index] = (cw, ccw);
-        }
-    }
-    let Reply::Unlock { unlocked, .. } = exchange(io, &Ask::UnlockStatus)? else {
-        return Err(Error::Protocol("unlock status"));
-    };
-    let mut entries = Entries {
-        tap_dances: Vec::with_capacity(usize::from(tap_dance)),
-        combos: Vec::with_capacity(usize::from(combo)),
-        macros: Vec::new(),
-        macro_bytes: Vec::new(),
-        macro_memory: 0,
-    };
-    for index in 0..tap_dance {
-        let Reply::Words(words) = exchange(io, &Ask::GetTapDance { index })? else {
-            return Err(Error::Protocol("tap dance"));
-        };
-        entries.tap_dances.push(TapDance::from_words(words));
-    }
-    for index in 0..combo {
-        let Reply::Words(keys) = exchange(io, &Ask::GetCombo { index })? else {
-            return Err(Error::Protocol("combo"));
-        };
-        entries.combos.push(Combo { keys });
-    }
-    // The protocol 2 action codes are the only ones written here, so older boards get no macro tab.
-    if version >= 2 && macros > 0 {
-        let Reply::MacroBufferSize(memory) = exchange(io, &Ask::MacroBufferSize)? else {
-            return Err(Error::Protocol("macro buffer size"));
-        };
-        entries.macro_memory = usize::from(memory);
-        let mut offset = 0usize;
-        // Stop once every macro has its NUL, as vial-gui does.
-        while offset < entries.macro_memory
-            && entries
-                .macro_bytes
-                .iter()
-                .filter(|byte| **byte == 0)
-                .count()
-                < usize::from(macros)
-        {
-            let len = (entries.macro_memory - offset).min(usize::from(CHUNK)) as u8;
-            let Reply::Chunk(chunk) = exchange(
-                io,
-                &Ask::MacroChunk {
-                    offset: offset as u16,
-                    len,
-                },
-            )?
-            else {
-                return Err(Error::Protocol("macro buffer"));
-            };
-            entries.macro_bytes.extend_from_slice(&chunk);
-            offset += usize::from(len);
-        }
-        entries.macros = entries::decode_macros(&entries.macro_bytes, usize::from(macros));
-    }
-    Ok(Loaded {
-        catalog: catalog::merge(&def.custom, tap_dance, macros, def.midi, layers, features),
-        keymap: Keymap {
-            layers,
-            rows,
-            cols,
-            matrix,
-            encoders,
-        },
-        options,
-        locked: !unlocked,
-        entries,
-        def,
-    })
+#[derive(Clone, Copy)]
+enum Phase {
+    Id,
+    Entries,
+    DefSize,
+    Def { block: u32 },
+    Options,
+    Layers,
+    MacroCount,
+    Keymap { offset: usize },
+    Encoder { layer: u8, index: usize },
+    Unlock,
+    TapDance(u8),
+    Combo(u8),
+    MacroSize,
+    Macro { offset: usize },
+    Done,
 }
 
+/// `what` names the part being read, with its own count when it has one.
+pub(super) struct Progress {
+    pub(super) what: String,
+    pub(super) percent: usize,
+}
+
+impl Load {
+    pub(super) fn begin(candidate: &Candidate) -> Result<Self> {
+        if candidate
+            .guard
+            .as_ref()
+            .is_some_and(|guard| guard.borrow().open)
+        {
+            return Err(Error::Busy);
+        }
+        if candidate.io.is_none() {
+            return Err(Error::Disconnected);
+        }
+        Ok(Self {
+            phase: Phase::Id,
+            done: 0,
+            percent: 0,
+            version: 0,
+            features: Features::default(),
+            tap_dance: 0,
+            combo: 0,
+            size: 0,
+            compressed: Vec::new(),
+            def: None,
+            options: 0,
+            layers: 0,
+            macros: 0,
+            matrix: Vec::new(),
+            encoders: Vec::new(),
+            unlocked: false,
+            entries: Entries::default(),
+        })
+    }
+
+    /// One report. `true` once the board is fully read.
+    pub(super) fn step(&mut self, candidate: &mut Candidate) -> Result<bool> {
+        let io = candidate.io.as_deref_mut().ok_or(Error::Disconnected)?;
+        self.phase = self.read(io)?;
+        self.done += 1;
+        // Each count is learned on the way, so the total grows early on. Hold the bar where it
+        // got to rather than step back.
+        self.percent = self
+            .percent
+            .max(self.done * 100 / self.total().max(self.done));
+        Ok(matches!(self.phase, Phase::Done))
+    }
+
+    /// Reports for the whole board, counting only the parts sized so far.
+    fn total(&self) -> usize {
+        3 + (self.size as usize).div_ceil(32)
+            + 3
+            + (self.matrix.len() * 2).div_ceil(usize::from(CHUNK))
+            + self.encoders.iter().map(Vec::len).sum::<usize>()
+            + 1
+            + usize::from(self.tap_dance)
+            + usize::from(self.combo)
+            + if self.macros > 0 {
+                1 + self.entries.macro_memory.div_ceil(usize::from(CHUNK))
+            } else {
+                0
+            }
+    }
+
+    pub(super) fn progress(&self) -> Progress {
+        let blocks = (self.size as usize).div_ceil(32);
+        let chunks = (self.matrix.len() * 2).div_ceil(usize::from(CHUNK));
+        let encoders = self.encoders.iter().map(Vec::len).sum::<usize>();
+        let macro_chunks = self.entries.macro_memory.div_ceil(usize::from(CHUNK));
+        let part = |name: &str, at: usize, of: usize| format!("{name} {}/{of}", at.min(of));
+        let what = match self.phase {
+            Phase::Id | Phase::Entries | Phase::DefSize => "connecting".to_string(),
+            Phase::Def { block } => part("layout", block as usize, blocks),
+            Phase::Options | Phase::Layers | Phase::MacroCount => "layout".to_string(),
+            Phase::Keymap { offset } => part("keymap", offset / usize::from(CHUNK), chunks),
+            Phase::Encoder { layer, index } => {
+                let per = encoders / usize::from(self.layers.max(1));
+                part("encoders", usize::from(layer) * per + index, encoders)
+            }
+            Phase::Unlock => "lock state".to_string(),
+            Phase::TapDance(index) => part(
+                "tap dances",
+                usize::from(index),
+                usize::from(self.tap_dance),
+            ),
+            Phase::Combo(index) => part("combos", usize::from(index), usize::from(self.combo)),
+            Phase::MacroSize => "macros".to_string(),
+            Phase::Macro { offset } => part("macros", offset / usize::from(CHUNK), macro_chunks),
+            Phase::Done => "done".to_string(),
+        };
+        Progress {
+            what,
+            percent: self.percent,
+        }
+    }
+
+    /// Sends the report for the current phase and returns the next phase, skipping empty ones.
+    fn read(&mut self, io: &mut dyn Io) -> Result<Phase> {
+        Ok(match self.phase {
+            Phase::Id => {
+                let Reply::Id { version, .. } = exchange(io, &Ask::KeyboardId)? else {
+                    return Err(Error::Protocol("keyboard id"));
+                };
+                if !(-1..=6).contains(&version) {
+                    return Err(Error::Unsupported { vial: version });
+                }
+                self.version = version;
+                // Vial asks for dynamic entries from protocol 4.
+                if version >= 4 {
+                    Phase::Entries
+                } else {
+                    Phase::DefSize
+                }
+            }
+            Phase::Entries => {
+                let Reply::Entries {
+                    tap_dance,
+                    combo,
+                    alt_repeat,
+                    flags,
+                } = exchange(io, &Ask::Entries)?
+                else {
+                    return Err(Error::Protocol("dynamic entries"));
+                };
+                // Persistent default layer is unconditional from protocol 5.
+                self.features = Features {
+                    caps_word: flags & 0x01 != 0,
+                    layer_lock: flags & 0x02 != 0,
+                    repeat_key: alt_repeat > 0,
+                    persistent_default_layer: self.version >= 5,
+                };
+                self.tap_dance = tap_dance;
+                self.combo = combo;
+                Phase::DefSize
+            }
+            Phase::DefSize => {
+                let Reply::DefSize(size) = exchange(io, &Ask::DefinitionSize)? else {
+                    return Err(Error::Protocol("definition size"));
+                };
+                if size == 0 {
+                    return Err(Error::NoLayout);
+                }
+                self.size = size;
+                self.compressed = Vec::with_capacity(size as usize);
+                Phase::Def { block: 0 }
+            }
+            Phase::Def { block } => {
+                let Reply::DefBlock(chunk) = exchange(io, &Ask::Definition { block })? else {
+                    return Err(Error::Protocol("definition block"));
+                };
+                // The report is 32 bytes. The last block's tail is padding, so the declared size decides the cut.
+                let take = (self.size as usize - self.compressed.len()).min(32);
+                if chunk.len() < take {
+                    return Err(Error::Protocol("definition block"));
+                }
+                self.compressed.extend_from_slice(&chunk[..take]);
+                if self.compressed.len() < self.size as usize {
+                    return Ok(Phase::Def { block: block + 1 });
+                }
+                let json = decompress(&self.compressed)?;
+                let text = String::from_utf8(json).map_err(|_| Error::NoLayout)?;
+                self.def = Some(layout::parse(&text)?);
+                Phase::Options
+            }
+            Phase::Options => {
+                let Reply::LayoutOptions(options) = exchange(io, &Ask::LayoutOptions)? else {
+                    return Err(Error::Protocol("layout options"));
+                };
+                self.options = options;
+                Phase::Layers
+            }
+            Phase::Layers => {
+                let Reply::LayerCount(layers) = exchange(io, &Ask::LayerCount)? else {
+                    return Err(Error::Protocol("layer count"));
+                };
+                let def = self.def.as_ref().ok_or(Error::NoLayout)?;
+                let cells = cell_count(layers, def.rows_n, def.cols_n)?;
+                // Keymap offsets are 16-bit.
+                if cells * 2 > usize::from(u16::MAX) {
+                    return Err(Error::Protocol("keymap size"));
+                }
+                self.matrix = vec![0u16; cells];
+                self.encoders = vec![vec![(0, 0); layout::encoder_count(def)]; usize::from(layers)];
+                self.layers = layers;
+                Phase::MacroCount
+            }
+            Phase::MacroCount => {
+                let Reply::MacroCount(macros) = exchange(io, &Ask::MacroCount)? else {
+                    return Err(Error::Protocol("macro count"));
+                };
+                self.macros = macros;
+                self.keymap_from(0)
+            }
+            Phase::Keymap { offset } => {
+                let len = (self.matrix.len() * 2 - offset).min(usize::from(CHUNK)) as u8;
+                let Reply::Chunk(chunk) = exchange(
+                    io,
+                    &Ask::KeymapChunk {
+                        offset: offset as u16,
+                        len,
+                    },
+                )?
+                else {
+                    return Err(Error::Protocol("keymap chunk"));
+                };
+                if chunk.len() < usize::from(len) {
+                    return Err(Error::Protocol("keymap chunk"));
+                }
+                let (pairs, _) = chunk[..usize::from(len)].as_chunks::<2>();
+                for (index, pair) in pairs.iter().enumerate() {
+                    self.matrix[offset / 2 + index] = u16::from_be_bytes(*pair);
+                }
+                self.keymap_from(offset + usize::from(len))
+            }
+            Phase::Encoder { layer, index } => {
+                let Reply::Encoder { cw, ccw } = exchange(
+                    io,
+                    &Ask::GetEncoder {
+                        layer,
+                        index: index as u8,
+                    },
+                )?
+                else {
+                    return Err(Error::Protocol("encoder"));
+                };
+                self.encoders[usize::from(layer)][index] = (cw, ccw);
+                self.encoder_from(layer, index + 1)
+            }
+            Phase::Unlock => {
+                let Reply::Unlock { unlocked, .. } = exchange(io, &Ask::UnlockStatus)? else {
+                    return Err(Error::Protocol("unlock status"));
+                };
+                self.unlocked = unlocked;
+                self.tap_dance_from(0)
+            }
+            Phase::TapDance(index) => {
+                let Reply::Words(words) = exchange(io, &Ask::GetTapDance { index })? else {
+                    return Err(Error::Protocol("tap dance"));
+                };
+                self.entries.tap_dances.push(TapDance::from_words(words));
+                self.tap_dance_from(index + 1)
+            }
+            Phase::Combo(index) => {
+                let Reply::Words(keys) = exchange(io, &Ask::GetCombo { index })? else {
+                    return Err(Error::Protocol("combo"));
+                };
+                self.entries.combos.push(Combo { keys });
+                self.combo_from(index + 1)
+            }
+            Phase::MacroSize => {
+                let Reply::MacroBufferSize(memory) = exchange(io, &Ask::MacroBufferSize)? else {
+                    return Err(Error::Protocol("macro buffer size"));
+                };
+                self.entries.macro_memory = usize::from(memory);
+                self.macro_from(0)
+            }
+            Phase::Macro { offset } => {
+                let len = (self.entries.macro_memory - offset).min(usize::from(CHUNK)) as u8;
+                let Reply::Chunk(chunk) = exchange(
+                    io,
+                    &Ask::MacroChunk {
+                        offset: offset as u16,
+                        len,
+                    },
+                )?
+                else {
+                    return Err(Error::Protocol("macro buffer"));
+                };
+                self.entries.macro_bytes.extend_from_slice(&chunk);
+                self.macro_from(offset + usize::from(len))
+            }
+            Phase::Done => Phase::Done,
+        })
+    }
+
+    fn keymap_from(&self, offset: usize) -> Phase {
+        if offset < self.matrix.len() * 2 {
+            Phase::Keymap { offset }
+        } else {
+            self.encoder_from(0, 0)
+        }
+    }
+
+    fn encoder_from(&self, layer: u8, index: usize) -> Phase {
+        let per = self.encoders.first().map_or(0, Vec::len);
+        if per == 0 || layer >= self.layers {
+            Phase::Unlock
+        } else if index < per {
+            Phase::Encoder { layer, index }
+        } else {
+            self.encoder_from(layer + 1, 0)
+        }
+    }
+
+    fn tap_dance_from(&self, index: u8) -> Phase {
+        if index < self.tap_dance {
+            Phase::TapDance(index)
+        } else {
+            self.combo_from(0)
+        }
+    }
+
+    fn combo_from(&self, index: u8) -> Phase {
+        if index < self.combo {
+            Phase::Combo(index)
+        } else if self.version >= 2 && self.macros > 0 {
+            // The protocol 2 action codes are the only ones written here, so older boards get no macro tab.
+            Phase::MacroSize
+        } else {
+            Phase::Done
+        }
+    }
+
+    /// Stops once every macro has its NUL, as vial-gui does.
+    fn macro_from(&self, offset: usize) -> Phase {
+        let ended = self
+            .entries
+            .macro_bytes
+            .iter()
+            .filter(|byte| **byte == 0)
+            .count();
+        if offset < self.entries.macro_memory && ended < usize::from(self.macros) {
+            Phase::Macro { offset }
+        } else {
+            Phase::Done
+        }
+    }
+
+    /// The read board. Call after `step` returns `true`.
+    pub(super) fn finish(mut self, mut candidate: Candidate) -> Board {
+        let def = self.def.take().expect("a finished load has a definition");
+        if self.version >= 2 && self.macros > 0 {
+            self.entries.macros =
+                entries::decode_macros(&self.entries.macro_bytes, usize::from(self.macros));
+        }
+        let guard = candidate.guard.clone();
+        if let Some(guard) = &guard {
+            guard.borrow_mut().open = true;
+        }
+        let keymap = Keymap {
+            layers: self.layers,
+            rows: def.rows_n,
+            cols: def.cols_n,
+            matrix: self.matrix,
+            encoders: self.encoders,
+        };
+        let saved = Saved {
+            matrix: keymap.matrix.clone(),
+            encoders: keymap.encoders.clone(),
+            tap_dances: self.entries.tap_dances.clone(),
+            combos: self.entries.combos.clone(),
+            macros: self.entries.macros.clone(),
+        };
+        Board {
+            name: candidate.listing.name.clone(),
+            catalog: catalog::merge(
+                &def.custom,
+                self.tap_dance,
+                self.macros,
+                def.midi,
+                self.layers,
+                self.features,
+            ),
+            def,
+            keymap,
+            options: self.options,
+            locked: !self.unlocked,
+            unlock: Vec::new(),
+            unlock_left: None,
+            entries: self.entries,
+            saved,
+            undo: Vec::new(),
+            io: candidate.io.take().expect("a finished load keeps its io"),
+            _guard: guard,
+        }
+    }
+}
+
+#[derive(Default)]
 struct Entries {
     tap_dances: Vec<TapDance>,
     combos: Vec<Combo>,
@@ -2277,10 +2463,20 @@ pub(super) struct Paint<'a> {
     pub(super) rows: u16,
 }
 
+/// What the chooser says on one card besides the board itself.
+pub(super) enum CardNote<'a> {
+    None,
+    /// This board would not open, and why.
+    Failed(usize, &'a str),
+    /// The highlighted board is being read.
+    Opening(Progress),
+}
+
 pub(super) fn pick_text(
     boards: &[Candidate],
     cursor: usize,
-    failed: Option<usize>,
+    note: CardNote<'_>,
+    notice: Option<&str>,
     popup: Option<&Popup>,
     mode: layout::Mode,
     footer: &[(String, &'static str)],
@@ -2290,7 +2486,7 @@ pub(super) fn pick_text(
     layout::render_pick(
         boards,
         cursor,
-        failed,
+        note,
         layout::Frame {
             header: layout::Header {
                 name: "choose a keyboard".to_string(),
@@ -2303,7 +2499,7 @@ pub(super) fn pick_text(
             hold: None,
             lower: None,
             popup,
-            notice: None,
+            notice: notice.map(str::to_string),
             footer,
             cols,
             rows,
@@ -2385,6 +2581,39 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn opening_shows_progress_and_esc_goes_back() {
+        let board = MemoryBoard::from_definition(
+            r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
+        )
+        .unwrap()
+        .named("slow");
+        let mut candidates = vec![board.candidate()];
+        // A board part-way read, as a slow Bluetooth board is between ticks.
+        let mut load = Load::begin(&candidates[0]).unwrap();
+        for _ in 0..3 {
+            assert!(!load.step(&mut candidates[0]).unwrap());
+        }
+        let mut model = super::super::Model {
+            kind: super::super::ModelKind::Open {
+                candidates,
+                cursor: 0,
+                load,
+            },
+            notice: None,
+        };
+        let text = plain(&model.text(60, 12));
+        assert!(text.contains("opening…"), "{text}");
+        assert!(text.contains('▰') && text.contains("layout"), "{text}");
+        model.handle(crate::Event::Cancel).unwrap();
+        let text = plain(&model.text(60, 12));
+        assert!(text.contains("stopped opening"), "{text}");
+        assert!(text.contains("▌ slow"), "{text}");
+        // The same board opens from the start again.
+        model.handle(crate::Event::Confirm).unwrap();
+        assert!(model.text(60, 12).contains("layer 1/"));
     }
 
     #[test]

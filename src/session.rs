@@ -1,5 +1,6 @@
 use crate::{Error, Result};
 use std::mem;
+use std::time::{Duration, Instant};
 
 mod keys;
 
@@ -32,8 +33,13 @@ pub enum Event {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
     Continue,
+    /// Still reading a board. Send `Tick` again right away instead of waiting for the next one.
+    Working,
     Quit,
 }
+
+/// How long one `Tick` keeps reading a board before the screen repaints.
+const SLICE: Duration = Duration::from_millis(60);
 
 /// An opened chooser or a loaded board. No public fields. `App::new` consumes it.
 pub struct Attached {
@@ -57,7 +63,14 @@ enum ModelKind {
     Pick {
         candidates: Vec<vial::Candidate>,
         cursor: usize,
-        failed: Option<usize>,
+        /// The board that would not open, and why.
+        failed: Option<(usize, String)>,
+    },
+    /// Reading the highlighted board. Esc goes back to the list.
+    Open {
+        candidates: Vec<vial::Candidate>,
+        cursor: usize,
+        load: vial::Load,
     },
     Map(Session<Mapping>),
     /// A tap dance, combo, or macro tab.
@@ -617,6 +630,7 @@ impl Model {
             ModelKind::Pick {
                 candidates, cursor, ..
             } => move_cursor(cursor, candidates.len(), dir),
+            ModelKind::Open { .. } => {}
             ModelKind::Map(session) => session.nudge(dir),
             ModelKind::Sheet { session, spot, .. } => {
                 match dir {
@@ -732,6 +746,7 @@ impl Model {
             ModelKind::Pick {
                 candidates, cursor, ..
             } => shift(cursor, candidates.len(), delta),
+            ModelKind::Open { .. } => {}
             ModelKind::Search {
                 session,
                 browse,
@@ -767,6 +782,7 @@ impl Model {
             ModelKind::Pick {
                 candidates, cursor, ..
             } => *cursor = pick(candidates.len()),
+            ModelKind::Open { .. } => {}
             ModelKind::Search {
                 session,
                 browse,
@@ -867,14 +883,7 @@ impl Model {
                 candidates,
                 cursor,
                 failed,
-            } => {
-                self.kind = ModelKind::Pick {
-                    candidates,
-                    cursor,
-                    failed,
-                };
-                return self.confirm_pick();
-            }
+            } => return self.open_pick(candidates, cursor, failed),
             ModelKind::Map(session) => self.kind = searching(session, Target::Key),
             ModelKind::Sheet { session, spot } => self.kind = open_cell(session, spot),
             ModelKind::Search {
@@ -908,46 +917,77 @@ impl Model {
         Ok(Step::Continue)
     }
 
-    fn confirm_pick(&mut self) -> Result<Step> {
-        let ModelKind::Pick {
-            mut candidates,
-            cursor,
-            failed,
-        } = mem::replace(&mut self.kind, vacant())
-        else {
-            return Ok(Step::Continue);
-        };
-        if cursor >= candidates.len() {
-            self.kind = ModelKind::Pick {
-                candidates,
-                cursor,
-                failed,
-            };
-            return Ok(Step::Continue);
-        }
-        let candidate = candidates.remove(cursor);
-        match vial::load_keep(candidate) {
-            Ok(board) => {
-                self.kind = ModelKind::Map(Session::mapped(board));
-                Ok(Step::Continue)
+    /// Starts reading the highlighted board. A board that cannot open stays on the list with why.
+    fn open_pick(
+        &mut self,
+        candidates: Vec<vial::Candidate>,
+        cursor: usize,
+        failed: Option<(usize, String)>,
+    ) -> Result<Step> {
+        match candidates.get(cursor).map(vial::Load::begin) {
+            Some(Ok(load)) => {
+                self.kind = ModelKind::Open {
+                    candidates,
+                    cursor,
+                    load,
+                };
+                self.pump()
             }
-            Err((Error::NoLayout, candidate)) => {
-                candidates.insert(cursor, candidate);
+            Some(Err(err)) => {
                 self.kind = ModelKind::Pick {
                     candidates,
                     cursor,
-                    failed: Some(cursor),
+                    failed: Some((cursor, why_not(&err))),
                 };
                 Ok(Step::Continue)
             }
-            Err((err, candidate)) => {
-                candidates.insert(cursor, candidate);
+            None => {
                 self.kind = ModelKind::Pick {
                     candidates,
                     cursor,
                     failed,
                 };
-                Err(err)
+                Ok(Step::Continue)
+            }
+        }
+    }
+
+    /// Reads reports for one slice, then hands back `Working` so the screen repaints and Esc
+    /// gets through. A board that reads fast opens inside the first slice.
+    fn pump(&mut self) -> Result<Step> {
+        let ModelKind::Open {
+            mut candidates,
+            cursor,
+            mut load,
+        } = mem::replace(&mut self.kind, vacant())
+        else {
+            return Ok(Step::Continue);
+        };
+        let until = Instant::now() + SLICE;
+        loop {
+            match load.step(&mut candidates[cursor]) {
+                Ok(true) => {
+                    let board = load.finish(candidates.remove(cursor));
+                    self.kind = ModelKind::Map(Session::mapped(board));
+                    return Ok(Step::Continue);
+                }
+                Ok(false) if Instant::now() < until => {}
+                Ok(false) => {
+                    self.kind = ModelKind::Open {
+                        candidates,
+                        cursor,
+                        load,
+                    };
+                    return Ok(Step::Working);
+                }
+                Err(err) => {
+                    self.kind = ModelKind::Pick {
+                        candidates,
+                        cursor,
+                        failed: Some((cursor, why_not(&err))),
+                    };
+                    return Ok(Step::Continue);
+                }
             }
         }
     }
@@ -1055,6 +1095,16 @@ impl Model {
 
     fn cancel(&mut self) -> Result<Step> {
         match mem::replace(&mut self.kind, vacant()) {
+            ModelKind::Open {
+                candidates, cursor, ..
+            } => {
+                self.notice = Some("stopped opening the keyboard".to_string());
+                self.kind = ModelKind::Pick {
+                    candidates,
+                    cursor,
+                    failed: None,
+                };
+            }
             ModelKind::Search {
                 session, target, ..
             } => self.kind = back_to(session, target.spot()),
@@ -1118,6 +1168,9 @@ impl Model {
     }
 
     fn tick(&mut self) -> Result<Step> {
+        if matches!(self.kind, ModelKind::Open { .. }) {
+            return self.pump();
+        }
         let kind = mem::replace(&mut self.kind, vacant());
         let (session, back, quit) = match kind {
             ModelKind::Hold {
@@ -1188,7 +1241,7 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
         | ModelKind::Ask { session, back, .. }
         | ModelKind::Command { session, back, .. } => Some((session, back)),
         ModelKind::Help { under, .. } => into_session(*under),
-        ModelKind::Pick { .. } => None,
+        ModelKind::Pick { .. } | ModelKind::Open { .. } => None,
     }
 }
 
@@ -1436,6 +1489,15 @@ fn clamp_col(board: &vial::Board, spot: &mut vial::Spot) {
     spot.col = spot.col.min(sheet_cols(board, *spot).saturating_sub(1));
 }
 
+/// The chooser's card text for a board that would not open. A sleeping Bluetooth board just
+/// stops answering, so that case says how to retry.
+fn why_not(err: &Error) -> String {
+    match err {
+        Error::Disconnected => "no answer: wake it, then enter".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn vacant() -> ModelKind {
     ModelKind::Pick {
         candidates: Vec::new(),
@@ -1447,6 +1509,8 @@ fn vacant() -> ModelKind {
 fn view_of(kind: &ModelKind) -> keys::View {
     match kind {
         ModelKind::Pick { .. } => keys::View::Pick,
+        // Esc is the only key while a board reads.
+        ModelKind::Open { .. } => keys::View::Hold,
         ModelKind::Map(_) => keys::View::Map,
         ModelKind::Sheet { .. } => keys::View::Sheet,
         ModelKind::Search { .. } => keys::View::Search,
@@ -1467,6 +1531,7 @@ fn mode_of(kind: &ModelKind) -> vial::Mode {
     use vial::ModeTone::{Alert, Browse, Input};
     let (label, tone) = match kind {
         ModelKind::Pick { .. } => ("CHOOSE", Browse),
+        ModelKind::Open { .. } => ("OPENING", Browse),
         ModelKind::Map(_) => ("KEYMAP", Browse),
         ModelKind::Sheet { spot, .. } => (
             match spot.tab {
@@ -1510,7 +1575,33 @@ fn render(
             cursor,
             failed,
         } => vial::pick_text(
-            candidates, *cursor, *failed, popup, mode, &footer, cols, rows,
+            candidates,
+            *cursor,
+            match failed {
+                Some((index, why)) => vial::CardNote::Failed(*index, why),
+                None => vial::CardNote::None,
+            },
+            notice,
+            popup,
+            mode,
+            &footer,
+            cols,
+            rows,
+        ),
+        ModelKind::Open {
+            candidates,
+            cursor,
+            load,
+        } => vial::pick_text(
+            candidates,
+            *cursor,
+            vial::CardNote::Opening(load.progress()),
+            notice,
+            popup,
+            mode,
+            &footer,
+            cols,
+            rows,
         ),
         ModelKind::Map(session) => session.paint(None, None, None, &chrome),
         ModelKind::Sheet { session, spot } => session.paint(Some(*spot), None, None, &chrome),

@@ -19,6 +19,16 @@ impl Terminal {
         }
         Ok(Self)
     }
+    /// A waiting key, else `Tick` without waiting.
+    fn event_now() -> lazyvial::Result<Event> {
+        while event::poll(Duration::ZERO).map_err(|_| lazyvial::Error::Disconnected)? {
+            let term = event::read().map_err(|_| lazyvial::Error::Disconnected)?;
+            if let Some(event) = map_term(term) {
+                return Ok(event);
+            }
+        }
+        Ok(Event::Tick)
+    }
 
     /// The next key, or `Tick` once `due` passes. Ticks keep their cadence while keys stream in:
     /// holding the unlock keys auto-repeats into the terminal, and the unlock only counts polls
@@ -117,16 +127,29 @@ fn map_key(key: KeyEvent) -> Event {
 }
 
 fn run() -> lazyvial::Result<()> {
-    let attached = lazyvial::attach()?;
+    // Asking each HID device for its Vial id can take a moment over Bluetooth.
+    eprint!("looking for Vial keyboards…");
+    let attached = lazyvial::attach();
+    eprint!("\r\x1b[K");
+    let attached = attached?;
     let mut app = App::new(attached, Terminal::open()?);
     let mut due = Instant::now() + TICK;
+    // While a board is being read, ask for the next slice at once, still taking keys between.
+    let mut working = false;
     loop {
-        let event = Terminal::event(due)?;
-        if matches!(event, Event::Tick) {
+        let event = if working {
+            Terminal::event_now()?
+        } else {
+            Terminal::event(due)?
+        };
+        let tick = matches!(event, Event::Tick);
+        if tick {
             due = Instant::now() + TICK;
         }
-        if app.handle(event)? == Step::Quit {
-            return Ok(());
+        match app.handle(event)? {
+            Step::Quit => return Ok(()),
+            Step::Working => working = true,
+            Step::Continue => working &= !tick,
         }
     }
 }
