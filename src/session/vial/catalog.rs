@@ -436,10 +436,7 @@ mod tests {
             listed.hits.first().map(|hit| hit.legend.as_str()),
             Some("NO")
         );
-        assert_eq!(
-            listed.hits.last().map(|hit| hit.legend.as_str()),
-            Some("\"")
-        );
+        assert_eq!(listed.hits.last().map(|hit| hit.legend.as_str()), Some("?"));
         assert!(listed.hits.iter().all(|hit| hit.legend != "MO(0)"));
         assert!(listed.hits.iter().all(|hit| hit.legend != "Mute"));
         assert!(listed.hits.iter().all(|hit| hit.legend != "Bootloader"));
