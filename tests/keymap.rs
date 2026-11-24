@@ -576,7 +576,7 @@ fn catalog_endpoints_with_home_and_end() -> lazyvial::Result<()> {
     let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 24));
     app.handle(lazyvial::Event::Confirm)?;
     app.handle(lazyvial::Event::End)?;
-    assert!(app.screen().text().contains("> \""));
+    assert!(app.screen().text().contains("> ?"));
     app.handle(lazyvial::Event::Home)?;
     assert!(app.screen().text().contains("> NO"));
     Ok(())
@@ -614,7 +614,7 @@ fn multi_line_custom_names_stay_on_one_line() -> lazyvial::Result<()> {
         }"#,
     )?;
     let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
-    for ch in "/next".chars() {
+    for ch in "/next bt".chars() {
         app.handle(lazyvial::Event::Char(ch))?;
     }
     let text = app.screen().text();

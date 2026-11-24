@@ -126,17 +126,20 @@ pub(super) fn merge(
     Table { entries, shelves }
 }
 
-/// Vial's Layers tab for a board with `count` layers: each kind for every layer, `LT` for the first 16.
+/// The Layers shelf for a board with `count` layers: each kind for every layer, `LT` for the first 16.
 fn layer_keys(count: u8, features: Features) -> Vec<Entry> {
     // QMK packs the layer into the low 5 bits.
     let count = u16::from(count.min(32));
     let mut out = Vec::new();
-    if features.layer_lock {
-        out.push(entry("QK_LAYER_LOCK", "Layer Lock", 0x7C7B));
-    }
-    if count >= 4 {
-        out.push(entry("FN_MO13", "Fn1 (Fn3)", 0x7C77));
-        out.push(entry("FN_MO23", "Fn2 (Fn3)", 0x7C78));
+    for &(token, legend, code) in keycodes::LAYER {
+        let shown = match token {
+            "QK_LAYER_LOCK" => features.layer_lock,
+            // Tri-layer needs a lower, an upper and the third layer above them.
+            _ => count >= 4,
+        };
+        if shown {
+            out.push(entry(token, legend, code));
+        }
     }
     let pdf = features.persistent_default_layer;
     for (kind, base, shown) in [
@@ -176,7 +179,7 @@ fn entry(token: &str, legend: &str, code: u16) -> Entry {
         legend: legend.to_string(),
         code,
         // QMK's QK_BOOT. The flag, not the number, is what begin_hold checks.
-        hold_first: token == "QK_BOOT",
+        hold_first: token == "QK_BOOTLOADER",
         masked: token.ends_with("(kc)"),
     }
 }
@@ -426,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn shelf_zero_is_vial_basic() {
+    fn shelf_zero_is_basic() {
         let table = merge(&[], 32, 0, Midi::None, 4, ALL);
         let listed = list(&table, Range::Shelf(0));
         assert_eq!(
@@ -482,11 +485,11 @@ mod tests {
         assert!(two.contains(&"MO(1)"));
         assert!(!two.contains(&"MO(2)"));
         assert!(!two.contains(&"LT2(kc)"));
-        assert!(!two.contains(&"FN_MO13"));
+        assert!(!two.contains(&"QK_TRI_LAYER_LOWER"));
         assert_eq!(two.len(), 1 + 7 * 2 + 2);
         let table = layers(4);
         let four = tokens(&table, 2);
-        assert!(four.contains(&"FN_MO13"));
+        assert!(four.contains(&"QK_TRI_LAYER_LOWER"));
         assert!(four.contains(&"TO(3)"));
         let table = layers(20);
         let many = tokens(&table, 2);
@@ -542,7 +545,7 @@ mod tests {
         let macros = list(&table, Range::Shelf(7));
         assert_eq!(
             macros.hits.first().map(|hit| hit.legend.as_str()),
-            Some("DM1 Rec")
+            Some("DM Rec 1")
         );
     }
 

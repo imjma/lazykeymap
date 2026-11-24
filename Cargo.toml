@@ -1,6 +1,6 @@
 [package]
 name = "lazyvial"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Remap a Vial keyboard from the terminal"
 license = "MIT"
