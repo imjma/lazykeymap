@@ -1,0 +1,40 @@
+# lazyvial
+
+Remap a [Vial](https://get.vial.today) keyboard from the terminal: the keymap on every layer, tap dances, combos, and macros.
+
+## Install
+
+With Homebrew, on macOS or Linux:
+
+```sh
+brew tap imjma/lazyvial https://github.com/imjma/lazyvial
+brew install lazyvial
+```
+
+From source, with a Rust toolchain:
+
+```sh
+cargo install --git https://github.com/imjma/lazyvial
+```
+
+On Linux, the build needs `libudev` (`libudev-dev` on Debian and Ubuntu) and `pkg-config`, and reading the keyboard needs a udev rule that gives your user access to its hidraw device, the same rule Vial asks for.
+
+## Use
+
+Plug in a Vial keyboard and run `lazyvial`. Pick the keyboard, then:
+
+| Keys | Does |
+|---|---|
+| `h` `j` `k` `l`, arrows | move between keys |
+| `tab`, `shift-tab` | next and previous layer, then the Tap Dance, Combos, and Macros tabs |
+| `enter` or `/` | pick a keycode for the selected key |
+| `u` | undo the last change |
+| `:w` | write every change to the keyboard |
+| `:wq`, `:q`, `:q!`, `:e!` | write and quit, quit, quit without writing, discard changes |
+| `?` | every key, for the screen you are on |
+
+Changes stay in a draft, shown in green, until `:w`. Quitting with unsaved changes asks first. A locked keyboard asks you to hold its unlock keys only when a change needs it: the bootloader key, or macros.
+
+## License
+
+GPL-2.0-or-later. The keycode table is transcribed from [vial-gui](https://github.com/vial-kb/vial-gui), which is GPL-2.0-or-later.

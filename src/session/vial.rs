@@ -1,15 +1,19 @@
 use super::Attached;
 use crate::{Error, Result};
 use std::cell::RefCell;
-use std::cmp::Ordering;
-use std::io::{Read, Write};
+use std::io::{Read, Write as _};
 use std::sync::Arc;
 
 mod catalog;
+mod entries;
+mod keycodes;
+pub(super) use catalog::{Listed, Range};
+pub(super) use entries::{Action, Combo, Spot, Tab, TapDance, MAX_DELAY};
+pub(super) use layout::{Lower, Mode, ModeTone, Popup, PopupLine};
 mod layout;
 
-use catalog::Table;
-use layout::{Cap, Definition};
+use catalog::{Features, Table};
+use layout::{Cap, Definition, SheetCell, Tone};
 
 /// 32-byte message, without the HID report id.
 trait Io {
@@ -61,10 +65,20 @@ struct Store {
     name: String,
     compressed: Vec<u8>,
     layers: u8,
+    macros: u8,
+    /// The VIA macro buffer, `0x0D` reports its length.
+    macro_buffer: Vec<u8>,
+    /// Dynamic entries. Their lengths are the counts in the dynamic-entry reply.
+    tap_dances: Vec<[u16; 5]>,
+    combos: Vec<[u16; 5]>,
+    alt_repeat: u8,
+    feature_flags: u8,
     options: u32,
     locked: bool,
     unlock_pairs: Vec<(u8, u8)>,
     unlock_armed: bool,
+    /// Polls that stay locked after unlock start. Zero means the next poll is ready.
+    unlock_waits: u8,
     /// Row-major codes, length `layers * rows * cols`. Filled with `KC_NO`.
     matrix: Vec<u16>,
     /// `encoders[layer][index] = (clockwise, counterclockwise)`.
@@ -79,6 +93,62 @@ impl Store {
     fn answer(&mut self, ask: &Ask) -> Result<Reply> {
         match *ask {
             Ask::LayerCount => Ok(Reply::LayerCount(self.layers)),
+            Ask::MacroCount => Ok(Reply::MacroCount(self.macros)),
+            Ask::Entries => Ok(Reply::Entries {
+                tap_dance: self.tap_dances.len() as u8,
+                combo: self.combos.len() as u8,
+                alt_repeat: self.alt_repeat,
+                flags: self.feature_flags,
+            }),
+            Ask::MacroBufferSize => Ok(Reply::MacroBufferSize(self.macro_buffer.len() as u16)),
+            Ask::MacroChunk { offset, len } => {
+                let start = (offset as usize).min(self.macro_buffer.len());
+                let end = (start + len as usize).min(self.macro_buffer.len());
+                Ok(Reply::Chunk(self.macro_buffer[start..end].to_vec()))
+            }
+            Ask::SetMacroChunk { offset, len, data } => {
+                // vial-qmk skips macro writes until the board is unlocked.
+                if self.locked {
+                    return Ok(Reply::Ack);
+                }
+                let start = offset as usize;
+                let end = start + len as usize;
+                if end > self.macro_buffer.len() {
+                    return Err(Error::Protocol("macro write is outside the buffer"));
+                }
+                self.macro_buffer[start..end].copy_from_slice(&data[..len as usize]);
+                Ok(Reply::Ack)
+            }
+            Ask::GetTapDance { index } => self
+                .tap_dances
+                .get(index as usize)
+                .map(|words| Reply::Words(*words))
+                .ok_or(Error::Protocol("tap dance index")),
+            Ask::GetCombo { index } => self
+                .combos
+                .get(index as usize)
+                .map(|words| Reply::Words(*words))
+                .ok_or(Error::Protocol("combo index")),
+            Ask::SetTapDance { index, words } | Ask::SetCombo { index, words } => {
+                // Tap dances firewall every key; combos only the output.
+                let tap_dance = matches!(ask, Ask::SetTapDance { .. });
+                let mut words = words;
+                for (slot, word) in words.iter_mut().enumerate() {
+                    if (tap_dance && slot < 4) || (!tap_dance && slot == 4) {
+                        *word = self.firewall(*word);
+                    }
+                }
+                let list = if tap_dance {
+                    &mut self.tap_dances
+                } else {
+                    &mut self.combos
+                };
+                let slot = list
+                    .get_mut(index as usize)
+                    .ok_or(Error::Protocol("dynamic entry index"))?;
+                *slot = words;
+                Ok(Reply::Ack)
+            }
             Ask::LayoutOptions => Ok(Reply::LayoutOptions(self.options)),
             Ask::KeymapChunk { offset, len } => {
                 let bytes = keymap_bytes(&self.matrix);
@@ -97,14 +167,11 @@ impl Store {
                 col,
                 code,
             } => {
-                if self.locked {
-                    return Ok(Reply::Ack);
-                }
                 let index = cell(layer, row, col, self.rows, self.cols);
                 if index >= self.matrix.len() {
                     return Err(Error::Protocol("keycode is outside the matrix"));
                 }
-                self.matrix[index] = code;
+                self.matrix[index] = self.firewall(code);
                 Ok(Reply::Ack)
             }
             Ask::KeyboardId => Ok(Reply::Id {
@@ -143,9 +210,7 @@ impl Store {
                 direction,
                 code,
             } => {
-                if self.locked {
-                    return Ok(Reply::Ack);
-                }
+                let code = self.firewall(code);
                 let slot = self
                     .encoders
                     .get_mut(layer as usize)
@@ -167,10 +232,17 @@ impl Store {
             }
             Ask::UnlockPoll => {
                 if self.unlock_armed {
-                    self.locked = false;
-                    self.unlock_armed = false;
+                    if self.unlock_waits == 0 {
+                        self.locked = false;
+                        self.unlock_armed = false;
+                    } else {
+                        self.unlock_waits -= 1;
+                    }
                 }
-                Ok(self.unlock_reply())
+                Ok(Reply::Polled {
+                    unlocked: !self.locked,
+                    left: self.unlock_waits,
+                })
             }
         }
     }
@@ -188,7 +260,19 @@ impl Store {
         self.matrix = vec![0; cells];
         self.encoders = vec![vec![(0, 0); self.encoder_count]; layers as usize];
     }
+
+    /// vial-qmk `vial_keycode_firewall`: a locked board stores `QK_BOOT` as `KC_NO`.
+    fn firewall(&self, code: u16) -> u16 {
+        if self.locked && code == QK_BOOT {
+            0
+        } else {
+            code
+        }
+    }
 }
+
+/// The one code vial-qmk firewalls on a locked board. The fake mirrors it.
+const QK_BOOT: u16 = 0x7C00;
 
 /// Shares the store. A clone is the same keyboard, not a copy of the keys.
 /// `!Send` because the store is a `RefCell`. One thread. No mutex.
@@ -211,10 +295,17 @@ impl MemoryBoard {
             name: "board".to_string(),
             compressed,
             layers: 1,
+            macros: 0,
+            macro_buffer: vec![0; 1024],
+            tap_dances: Vec::new(),
+            combos: Vec::new(),
+            alt_repeat: 0,
+            feature_flags: 0,
             options: 0,
             locked: false,
             unlock_pairs: Vec::new(),
             unlock_armed: false,
+            unlock_waits: 0,
             matrix: Vec::new(),
             encoders: Vec::new(),
             rows,
@@ -231,6 +322,40 @@ impl MemoryBoard {
     /// What command `0x11` will answer.
     pub fn layers(self, count: u8) -> Self {
         self.store.borrow_mut().resize(count);
+        self
+    }
+
+    /// What command `0x0C` will answer. The macro buffer is 1024 bytes unless `macro_buffer` says otherwise.
+    pub fn macros(self, count: u8) -> Self {
+        self.store.borrow_mut().macros = count;
+        self
+    }
+
+    /// What command `0x0D` will answer. The buffer starts zeroed, so every macro is empty.
+    pub fn macro_buffer(self, bytes: u16) -> Self {
+        self.store.borrow_mut().macro_buffer = vec![0; usize::from(bytes)];
+        self
+    }
+
+    /// What Vial dynamic-entry count `0xFE 0x0D 0x00` will answer: `flags` bit 0 is Caps Word,
+    /// bit 1 is Layer Lock, and a nonzero `alt_repeat` turns on the repeat keys.
+    pub fn features(self, flags: u8, alt_repeat: u8) -> Self {
+        let mut store = self.store.borrow_mut();
+        store.feature_flags = flags;
+        store.alt_repeat = alt_repeat;
+        drop(store);
+        self
+    }
+
+    /// The tap dance count in the Vial dynamic-entry reply. Every entry starts as `KC_NO` with term 0.
+    pub fn tap_dances(self, count: u8) -> Self {
+        self.store.borrow_mut().tap_dances = vec![[0; 5]; usize::from(count)];
+        self
+    }
+
+    /// The combo count in the Vial dynamic-entry reply. Every combo starts as `KC_NO`.
+    pub fn combos(self, count: u8) -> Self {
+        self.store.borrow_mut().combos = vec![[0; 5]; usize::from(count)];
         self
     }
 
@@ -347,6 +472,13 @@ fn open_board(mut candidate: Candidate) -> std::result::Result<Board, (Error, Ca
     if let Some(guard) = &guard {
         guard.borrow_mut().open = true;
     }
+    let saved = Saved {
+        matrix: loaded.keymap.matrix.clone(),
+        encoders: loaded.keymap.encoders.clone(),
+        tap_dances: loaded.entries.tap_dances.clone(),
+        combos: loaded.entries.combos.clone(),
+        macros: loaded.entries.macros.clone(),
+    };
     Ok(Board {
         name: candidate.name.clone(),
         def: loaded.def,
@@ -354,9 +486,24 @@ fn open_board(mut candidate: Candidate) -> std::result::Result<Board, (Error, Ca
         keymap: loaded.keymap,
         options: loaded.options,
         locked: loaded.locked,
+        unlock: Vec::new(),
+        unlock_left: None,
+        entries: loaded.entries,
+        saved,
+        undo: Vec::new(),
         io,
         _guard: guard,
     })
+}
+
+/// What the keyboard holds, as last read or written. `Board::keymap` and `Board::entries` are the
+/// draft the screen shows; `pending` is the difference.
+struct Saved {
+    matrix: Vec<u16>,
+    encoders: Vec<Vec<(u16, u16)>>,
+    tap_dances: Vec<TapDance>,
+    combos: Vec<Combo>,
+    macros: Vec<Vec<Action>>,
 }
 
 struct Loaded {
@@ -365,6 +512,7 @@ struct Loaded {
     keymap: Keymap,
     options: u32,
     locked: bool,
+    entries: Entries,
 }
 
 fn read_board(io: &mut dyn Io) -> Result<Loaded> {
@@ -374,6 +522,27 @@ fn read_board(io: &mut dyn Io) -> Result<Loaded> {
     if !(-1..=6).contains(&version) {
         return Err(Error::Unsupported { vial: version });
     }
+    // Vial asks for dynamic entries from protocol 4. Persistent default layer is unconditional from 5.
+    let (features, tap_dance, combo) = if version >= 4 {
+        let Reply::Entries {
+            tap_dance,
+            combo,
+            alt_repeat,
+            flags,
+        } = exchange(io, &Ask::Entries)?
+        else {
+            return Err(Error::Protocol("dynamic entries"));
+        };
+        let features = Features {
+            caps_word: flags & 0x01 != 0,
+            layer_lock: flags & 0x02 != 0,
+            repeat_key: alt_repeat > 0,
+            persistent_default_layer: version >= 5,
+        };
+        (features, tap_dance, combo)
+    } else {
+        (Features::default(), 0, 0)
+    };
     let Reply::DefSize(size) = exchange(io, &Ask::DefinitionSize)? else {
         return Err(Error::Protocol("definition size"));
     };
@@ -404,6 +573,9 @@ fn read_board(io: &mut dyn Io) -> Result<Loaded> {
     };
     let Reply::LayerCount(layers) = exchange(io, &Ask::LayerCount)? else {
         return Err(Error::Protocol("layer count"));
+    };
+    let Reply::MacroCount(macros) = exchange(io, &Ask::MacroCount)? else {
+        return Err(Error::Protocol("macro count"));
     };
     let rows = def.rows_n;
     let cols = def.cols_n;
@@ -457,8 +629,59 @@ fn read_board(io: &mut dyn Io) -> Result<Loaded> {
     let Reply::Unlock { unlocked, .. } = exchange(io, &Ask::UnlockStatus)? else {
         return Err(Error::Protocol("unlock status"));
     };
+    let mut entries = Entries {
+        tap_dances: Vec::with_capacity(usize::from(tap_dance)),
+        combos: Vec::with_capacity(usize::from(combo)),
+        macros: Vec::new(),
+        macro_bytes: Vec::new(),
+        macro_memory: 0,
+    };
+    for index in 0..tap_dance {
+        let Reply::Words(words) = exchange(io, &Ask::GetTapDance { index })? else {
+            return Err(Error::Protocol("tap dance"));
+        };
+        entries.tap_dances.push(TapDance::from_words(words));
+    }
+    for index in 0..combo {
+        let Reply::Words(keys) = exchange(io, &Ask::GetCombo { index })? else {
+            return Err(Error::Protocol("combo"));
+        };
+        entries.combos.push(Combo { keys });
+    }
+    // The protocol 2 action codes are the only ones written here, so older boards get no macro tab.
+    if version >= 2 && macros > 0 {
+        let Reply::MacroBufferSize(memory) = exchange(io, &Ask::MacroBufferSize)? else {
+            return Err(Error::Protocol("macro buffer size"));
+        };
+        entries.macro_memory = usize::from(memory);
+        let mut offset = 0usize;
+        // Stop once every macro has its NUL, as vial-gui does.
+        while offset < entries.macro_memory
+            && entries
+                .macro_bytes
+                .iter()
+                .filter(|byte| **byte == 0)
+                .count()
+                < usize::from(macros)
+        {
+            let len = (entries.macro_memory - offset).min(usize::from(CHUNK)) as u8;
+            let Reply::Chunk(chunk) = exchange(
+                io,
+                &Ask::MacroChunk {
+                    offset: offset as u16,
+                    len,
+                },
+            )?
+            else {
+                return Err(Error::Protocol("macro buffer"));
+            };
+            entries.macro_bytes.extend_from_slice(&chunk);
+            offset += usize::from(len);
+        }
+        entries.macros = entries::decode_macros(&entries.macro_bytes, usize::from(macros));
+    }
     Ok(Loaded {
-        catalog: catalog::merge(&def.custom),
+        catalog: catalog::merge(&def.custom, tap_dance, macros, def.midi, layers, features),
         keymap: Keymap {
             layers,
             rows,
@@ -468,8 +691,18 @@ fn read_board(io: &mut dyn Io) -> Result<Loaded> {
         },
         options,
         locked: !unlocked,
+        entries,
         def,
     })
+}
+
+struct Entries {
+    tap_dances: Vec<TapDance>,
+    combos: Vec<Combo>,
+    macros: Vec<Vec<Action>>,
+    /// The device buffer as last read or written. A write sends only the chunks that differ.
+    macro_bytes: Vec<u8>,
+    macro_memory: usize,
 }
 
 pub(super) struct Board {
@@ -479,6 +712,15 @@ pub(super) struct Board {
     keymap: Keymap,
     options: u32,
     locked: bool,
+    /// The keys the last unlock status asked for. Paint marks them during a hold.
+    unlock: Vec<(u8, u8)>,
+    /// The firmware's unlock countdown from the last poll. `None` before the first poll of a hold.
+    unlock_left: Option<u8>,
+    /// The draft. Edits land here; `commit` copies each written change into `saved`.
+    entries: Entries,
+    saved: Saved,
+    /// What each staged change replaced, newest last.
+    undo: Vec<Write>,
     io: Box<dyn Io>,
     /// Clears `Store.open` on drop when this board came from a fake.
     _guard: Option<Arc<RefCell<Store>>>,
@@ -509,6 +751,7 @@ impl Keymap {
 /// Private so `app` cannot match it. Response shape is a property of the ask.
 enum Ask {
     LayerCount,
+    MacroCount,
     LayoutOptions,
     KeymapChunk {
         offset: u16,
@@ -538,6 +781,34 @@ enum Ask {
     UnlockStatus,
     UnlockStart,
     UnlockPoll,
+    /// Vial dynamic-entry counts. The last byte carries the optional feature bits.
+    Entries,
+    GetTapDance {
+        index: u8,
+    },
+    /// Little-endian on, hold, double tap, tap-hold, then the term.
+    SetTapDance {
+        index: u8,
+        words: [u16; 5],
+    },
+    GetCombo {
+        index: u8,
+    },
+    /// Little-endian, four inputs then the output.
+    SetCombo {
+        index: u8,
+        words: [u16; 5],
+    },
+    MacroBufferSize,
+    MacroChunk {
+        offset: u16,
+        len: u8,
+    },
+    SetMacroChunk {
+        offset: u16,
+        len: u8,
+        data: [u8; CHUNK as usize],
+    },
 }
 
 enum Grammar {
@@ -550,9 +821,14 @@ enum Grammar {
 impl Ask {
     fn grammar(&self) -> Grammar {
         match self {
-            Ask::LayerCount | Ask::LayoutOptions | Ask::KeymapChunk { .. } | Ask::SetKey { .. } => {
-                Grammar::Echo
-            }
+            Ask::LayerCount
+            | Ask::MacroCount
+            | Ask::LayoutOptions
+            | Ask::KeymapChunk { .. }
+            | Ask::SetKey { .. }
+            | Ask::MacroBufferSize
+            | Ask::MacroChunk { .. }
+            | Ask::SetMacroChunk { .. } => Grammar::Echo,
             Ask::KeyboardId
             | Ask::DefinitionSize
             | Ask::Definition { .. }
@@ -560,7 +836,12 @@ impl Ask {
             | Ask::SetEncoder { .. }
             | Ask::UnlockStatus
             | Ask::UnlockStart
-            | Ask::UnlockPoll => Grammar::Overwrite,
+            | Ask::UnlockPoll
+            | Ask::Entries
+            | Ask::GetTapDance { .. }
+            | Ask::SetTapDance { .. }
+            | Ask::GetCombo { .. }
+            | Ask::SetCombo { .. } => Grammar::Overwrite,
         }
     }
 }
@@ -569,6 +850,10 @@ const CHUNK: u8 = 28;
 const GET_KEYBOARD_VALUE: u8 = 0x02;
 const LAYOUT_OPTIONS_ID: u8 = 0x02;
 const SET_KEYCODE: u8 = 0x05;
+const MACRO_COUNT: u8 = 0x0C;
+const MACRO_BUFFER_SIZE: u8 = 0x0D;
+const MACRO_GET_BUFFER: u8 = 0x0E;
+const MACRO_SET_BUFFER: u8 = 0x0F;
 const LAYER_COUNT: u8 = 0x11;
 const GET_BUFFER: u8 = 0x12;
 const VIAL: u8 = 0xFE;
@@ -580,12 +865,21 @@ const VIAL_SET_ENCODER: u8 = 0x04;
 const VIAL_UNLOCK_STATUS: u8 = 0x05;
 const VIAL_UNLOCK_START: u8 = 0x06;
 const VIAL_UNLOCK_POLL: u8 = 0x07;
+const VIAL_DYNAMIC_ENTRY_OP: u8 = 0x0D;
+const DYNAMIC_ENTRY_COUNTS: u8 = 0x00;
+const DYNAMIC_TAP_DANCE_GET: u8 = 0x01;
+const DYNAMIC_TAP_DANCE_SET: u8 = 0x02;
+const DYNAMIC_COMBO_GET: u8 = 0x03;
+const DYNAMIC_COMBO_SET: u8 = 0x04;
 const FAKE_VERSION: i32 = 6;
+/// vial-qmk `VIAL_UNLOCK_COUNTER_MAX`: polls the unlock keys must stay held for.
+const UNLOCK_COUNT: u8 = 50;
 
 fn encode(ask: &Ask) -> [u8; 32] {
     let mut buf = [0u8; 32];
     match *ask {
         Ask::LayerCount => buf[0] = LAYER_COUNT,
+        Ask::MacroCount => buf[0] = MACRO_COUNT,
         Ask::LayoutOptions => {
             buf[0] = GET_KEYBOARD_VALUE;
             buf[1] = LAYOUT_OPTIONS_ID;
@@ -654,6 +948,44 @@ fn encode(ask: &Ask) -> [u8; 32] {
             buf[0] = VIAL;
             buf[1] = VIAL_UNLOCK_POLL;
         }
+        Ask::Entries => {
+            buf[0] = VIAL;
+            buf[1] = VIAL_DYNAMIC_ENTRY_OP;
+            buf[2] = DYNAMIC_ENTRY_COUNTS;
+        }
+        Ask::GetTapDance { index } | Ask::GetCombo { index } => {
+            buf[0] = VIAL;
+            buf[1] = VIAL_DYNAMIC_ENTRY_OP;
+            buf[2] = if matches!(ask, Ask::GetTapDance { .. }) {
+                DYNAMIC_TAP_DANCE_GET
+            } else {
+                DYNAMIC_COMBO_GET
+            };
+            buf[3] = index;
+        }
+        Ask::SetTapDance { index, words } | Ask::SetCombo { index, words } => {
+            buf[0] = VIAL;
+            buf[1] = VIAL_DYNAMIC_ENTRY_OP;
+            buf[2] = if matches!(ask, Ask::SetTapDance { .. }) {
+                DYNAMIC_TAP_DANCE_SET
+            } else {
+                DYNAMIC_COMBO_SET
+            };
+            buf[3] = index;
+            put_words(&mut buf[4..14], words);
+        }
+        Ask::MacroBufferSize => buf[0] = MACRO_BUFFER_SIZE,
+        Ask::MacroChunk { offset, len } => {
+            buf[0] = MACRO_GET_BUFFER;
+            buf[1..3].copy_from_slice(&offset.to_be_bytes());
+            buf[3] = len;
+        }
+        Ask::SetMacroChunk { offset, len, data } => {
+            buf[0] = MACRO_SET_BUFFER;
+            buf[1..3].copy_from_slice(&offset.to_be_bytes());
+            buf[3] = len;
+            buf[4..4 + CHUNK as usize].copy_from_slice(&data);
+        }
     }
     buf
 }
@@ -668,17 +1000,21 @@ fn decode(ask: &Ask, resp: &[u8; 32]) -> Result<Reply> {
 fn decode_echo(ask: &Ask, resp: &[u8; 32]) -> Result<Reply> {
     match *ask {
         Ask::LayerCount => Ok(Reply::LayerCount(resp[1])),
+        Ask::MacroCount => Ok(Reply::MacroCount(resp[1])),
         Ask::LayoutOptions => {
             let dword = u32::from_be_bytes(resp[2..6].try_into().unwrap());
             Ok(Reply::LayoutOptions(dword))
         }
-        Ask::KeymapChunk { len, .. } => {
+        Ask::KeymapChunk { len, .. } | Ask::MacroChunk { len, .. } => {
             if len > CHUNK {
-                return Err(Error::Protocol("keymap chunk length"));
+                return Err(Error::Protocol("buffer chunk length"));
             }
             Ok(Reply::Chunk(resp[4..4 + len as usize].to_vec()))
         }
-        Ask::SetKey { .. } => Ok(Reply::Ack),
+        Ask::SetKey { .. } | Ask::SetMacroChunk { .. } => Ok(Reply::Ack),
+        Ask::MacroBufferSize => Ok(Reply::MacroBufferSize(u16::from_be_bytes([
+            resp[1], resp[2],
+        ]))),
         _ => Err(Error::Protocol("echo response")),
     }
 }
@@ -700,10 +1036,29 @@ fn decode_overwrite(ask: &Ask, resp: &[u8; 32]) -> Result<Reply> {
             ccw: u16::from_be_bytes([resp[2], resp[3]]),
         }),
         Ask::SetEncoder { .. } | Ask::UnlockStart => Ok(Reply::Ack),
-        Ask::UnlockStatus | Ask::UnlockPoll => Ok(Reply::Unlock {
+        Ask::UnlockStatus => Ok(Reply::Unlock {
             unlocked: resp[0] != 0,
             pairs: unlock_pairs(resp),
         }),
+        Ask::UnlockPoll => Ok(Reply::Polled {
+            unlocked: resp[0] != 0,
+            left: resp[2],
+        }),
+        Ask::Entries => Ok(Reply::Entries {
+            tap_dance: resp[0],
+            combo: resp[1],
+            alt_repeat: resp[3],
+            flags: resp[31],
+        }),
+        // Byte 0 is the firmware's status. Zero is success.
+        Ask::GetTapDance { .. } | Ask::GetCombo { .. } if resp[0] == 0 => {
+            Ok(Reply::Words(words_from(&resp[1..11])))
+        }
+        Ask::SetTapDance { .. } | Ask::SetCombo { .. } if resp[0] == 0 => Ok(Reply::Ack),
+        Ask::GetTapDance { .. }
+        | Ask::GetCombo { .. }
+        | Ask::SetTapDance { .. }
+        | Ask::SetCombo { .. } => Err(Error::Protocol("the board refused a dynamic entry")),
         _ => Err(Error::Protocol("overwrite response")),
     }
 }
@@ -711,6 +1066,21 @@ fn decode_overwrite(ask: &Ask, resp: &[u8; 32]) -> Result<Reply> {
 fn decode_request(report: &[u8; 32]) -> Result<Ask> {
     match report[0] {
         LAYER_COUNT => Ok(Ask::LayerCount),
+        MACRO_COUNT => Ok(Ask::MacroCount),
+        MACRO_BUFFER_SIZE => Ok(Ask::MacroBufferSize),
+        MACRO_GET_BUFFER | MACRO_SET_BUFFER => {
+            let offset = u16::from_be_bytes([report[1], report[2]]);
+            let len = report[3];
+            if len > CHUNK {
+                return Err(Error::Protocol("buffer chunk length"));
+            }
+            if report[0] == MACRO_GET_BUFFER {
+                return Ok(Ask::MacroChunk { offset, len });
+            }
+            let mut data = [0u8; CHUNK as usize];
+            data.copy_from_slice(&report[4..4 + CHUNK as usize]);
+            Ok(Ask::SetMacroChunk { offset, len, data })
+        }
         GET_KEYBOARD_VALUE if report[1] == LAYOUT_OPTIONS_ID => Ok(Ask::LayoutOptions),
         GET_BUFFER => {
             let len = report[3];
@@ -745,6 +1115,20 @@ fn decode_request(report: &[u8; 32]) -> Result<Ask> {
             VIAL_UNLOCK_STATUS => Ok(Ask::UnlockStatus),
             VIAL_UNLOCK_START => Ok(Ask::UnlockStart),
             VIAL_UNLOCK_POLL => Ok(Ask::UnlockPoll),
+            VIAL_DYNAMIC_ENTRY_OP => match report[2] {
+                DYNAMIC_ENTRY_COUNTS => Ok(Ask::Entries),
+                DYNAMIC_TAP_DANCE_GET => Ok(Ask::GetTapDance { index: report[3] }),
+                DYNAMIC_COMBO_GET => Ok(Ask::GetCombo { index: report[3] }),
+                DYNAMIC_TAP_DANCE_SET => Ok(Ask::SetTapDance {
+                    index: report[3],
+                    words: words_from(&report[4..14]),
+                }),
+                DYNAMIC_COMBO_SET => Ok(Ask::SetCombo {
+                    index: report[3],
+                    words: words_from(&report[4..14]),
+                }),
+                _ => Err(Error::Protocol("unknown dynamic entry command")),
+            },
             _ => Err(Error::Protocol("unknown vial command")),
         },
         _ => Err(Error::Protocol("unknown command")),
@@ -753,6 +1137,7 @@ fn decode_request(report: &[u8; 32]) -> Result<Ask> {
 
 enum Reply {
     LayerCount(u8),
+    MacroCount(u8),
     LayoutOptions(u32),
     Chunk(Vec<u8>),
     Ack,
@@ -770,6 +1155,34 @@ enum Reply {
         unlocked: bool,
         pairs: Vec<(u8, u8)>,
     },
+    /// vial-qmk: byte 2 counts down from 50 while every unlock key is held, and resets when one is not.
+    Polled {
+        unlocked: bool,
+        left: u8,
+    },
+    Entries {
+        tap_dance: u8,
+        combo: u8,
+        alt_repeat: u8,
+        flags: u8,
+    },
+    /// A tap dance or combo record.
+    Words([u16; 5]),
+    MacroBufferSize(u16),
+}
+
+fn put_words(out: &mut [u8], words: [u16; 5]) {
+    for (slot, word) in out.chunks_exact_mut(2).zip(words) {
+        slot.copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+fn words_from(bytes: &[u8]) -> [u16; 5] {
+    let mut words = [0u16; 5];
+    for (word, pair) in words.iter_mut().zip(bytes.chunks_exact(2)) {
+        *word = u16::from_le_bytes([pair[0], pair[1]]);
+    }
+    words
 }
 
 fn encode_reply(ask: &Ask, reply: &Reply) -> [u8; 32] {
@@ -778,15 +1191,22 @@ fn encode_reply(ask: &Ask, reply: &Reply) -> [u8; 32] {
         Grammar::Overwrite => [0u8; 32],
     };
     match (ask, reply) {
-        (Ask::LayerCount, Reply::LayerCount(count)) => buf[1] = *count,
+        (Ask::LayerCount, Reply::LayerCount(count))
+        | (Ask::MacroCount, Reply::MacroCount(count)) => buf[1] = *count,
         (Ask::LayoutOptions, Reply::LayoutOptions(dword)) => {
             buf[2..6].copy_from_slice(&dword.to_be_bytes());
         }
-        (Ask::KeymapChunk { len, .. }, Reply::Chunk(data)) => {
+        (Ask::KeymapChunk { len, .. } | Ask::MacroChunk { len, .. }, Reply::Chunk(data)) => {
             let n = (*len as usize).min(data.len()).min(CHUNK as usize);
             buf[4..4 + n].copy_from_slice(&data[..n]);
         }
-        (Ask::SetKey { .. }, Reply::Ack) => {}
+        (Ask::SetKey { .. } | Ask::SetMacroChunk { .. }, Reply::Ack) => {}
+        (Ask::MacroBufferSize, Reply::MacroBufferSize(size)) => {
+            buf[1..3].copy_from_slice(&size.to_be_bytes());
+        }
+        (Ask::GetTapDance { .. } | Ask::GetCombo { .. }, Reply::Words(words)) => {
+            put_words(&mut buf[1..11], *words);
+        }
         (Ask::KeyboardId, Reply::Id { version, uid }) => {
             buf[0..4].copy_from_slice(&(*version as u32).to_le_bytes());
             buf[4..12].copy_from_slice(uid);
@@ -803,7 +1223,7 @@ fn encode_reply(ask: &Ask, reply: &Reply) -> [u8; 32] {
             buf[2..4].copy_from_slice(&ccw.to_be_bytes());
         }
         (Ask::SetEncoder { .. } | Ask::UnlockStart, Reply::Ack) => {}
-        (Ask::UnlockStatus | Ask::UnlockPoll, Reply::Unlock { unlocked, pairs }) => {
+        (Ask::UnlockStatus, Reply::Unlock { unlocked, pairs }) => {
             buf[0] = u8::from(*unlocked);
             // Unused combo slots are 255,255. A zero byte would be row 0, column 0.
             for slot in 0..15 {
@@ -811,6 +1231,25 @@ fn encode_reply(ask: &Ask, reply: &Reply) -> [u8; 32] {
                 buf[2 + slot * 2] = row;
                 buf[3 + slot * 2] = col;
             }
+        }
+        (Ask::UnlockPoll, Reply::Polled { unlocked, left }) => {
+            buf[0] = u8::from(*unlocked);
+            buf[1] = u8::from(!*unlocked);
+            buf[2] = *left;
+        }
+        (
+            Ask::Entries,
+            Reply::Entries {
+                tap_dance,
+                combo,
+                alt_repeat,
+                flags,
+            },
+        ) => {
+            buf[0] = *tap_dance;
+            buf[1] = *combo;
+            buf[3] = *alt_repeat;
+            buf[31] = *flags;
         }
         _ => {}
     }
@@ -831,14 +1270,6 @@ fn unlock_pairs(resp: &[u8; 32]) -> Vec<(u8, u8)> {
     pairs
 }
 
-fn pairs_text(pairs: &[(u8, u8)]) -> String {
-    pairs
-        .iter()
-        .map(|(row, col)| format!("{row},{col}"))
-        .collect::<Vec<_>>()
-        .join("+")
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Dir {
     Left,
@@ -849,35 +1280,125 @@ pub(super) enum Dir {
 
 pub(in crate::session) use layout::Place;
 
+/// One pending change. `Board::commit` is the only function that sends any of them.
+#[derive(Clone, PartialEq)]
+pub(in crate::session) enum Write {
+    Key {
+        layer: u8,
+        place: Place,
+        code: u16,
+    },
+    TapDance {
+        index: u8,
+        entry: TapDance,
+    },
+    Combo {
+        index: u8,
+        entry: Combo,
+    },
+    /// Every macro. The buffer is one blob, so a change to one macro rewrites the rest in place.
+    Macros(Vec<Vec<Action>>),
+}
+
+impl Write {
+    fn codes(&self) -> Vec<u16> {
+        match self {
+            Write::Key { code, .. } => vec![*code],
+            Write::TapDance { entry, .. } => entry.keys.to_vec(),
+            Write::Combo { entry, .. } => entry.keys.to_vec(),
+            Write::Macros(macros) => macros
+                .iter()
+                .flatten()
+                .filter_map(|action| match action {
+                    Action::Tap(code) | Action::Down(code) | Action::Up(code) => Some(*code),
+                    Action::Text(_) | Action::Delay(_) => None,
+                })
+                .collect(),
+        }
+    }
+}
+
 impl Board {
     fn exchange(&mut self, ask: &Ask) -> Result<Reply> {
         exchange(&mut *self.io, ask)
     }
 
-    pub(super) fn begin_hold(&mut self, code: u16) -> Result<Option<Hold>> {
+    /// vial-qmk takes every key, encoder, tap dance, and combo write on a locked board, and only
+    /// swaps `QK_BOOT` for `KC_NO` (`vial_keycode_firewall`). Macro buffer writes are skipped until
+    /// unlocked. So the unlock hold is for those two cases, which is also when vial-gui asks.
+    fn needs_unlock(&self, write: &Write) -> bool {
+        matches!(write, Write::Macros(_))
+            || write.codes().into_iter().any(|code| self.hold_first(code))
+    }
+
+    /// `None` when the write needs no unlock or the board already reports unlocked.
+    pub(super) fn begin_hold(&mut self, write: &Write) -> Result<Option<Hold>> {
+        if !self.needs_unlock(write) {
+            return Ok(None);
+        }
         let Reply::Unlock { unlocked, pairs } = self.exchange(&Ask::UnlockStatus)? else {
             return Err(Error::Protocol("unlock status"));
         };
         self.locked = !unlocked;
-        if self.locked || self.hold_first(code) {
-            self.exchange(&Ask::UnlockStart)?;
-            return Ok(Some(Hold {
-                prompt: pairs_text(&pairs),
-            }));
+        self.unlock.clone_from(&pairs);
+        self.unlock_left = None;
+        if !self.locked {
+            return Ok(None);
         }
-        Ok(None)
+        self.exchange(&Ask::UnlockStart)?;
+        Ok(Some(Hold {
+            prompt: self.hold_prompt(write, &pairs),
+        }))
     }
 
-    /// The only set-key and set-encoder sender.
-    pub(super) fn commit(&mut self, layer: u8, place: Place, code: u16) -> Result<Commit> {
-        if self.code_at(layer, place) == Some(code) {
+    /// The only sender of set-key, set-encoder, tap dance, combo, and macro buffer writes.
+    pub(super) fn commit(&mut self, write: &Write) -> Result<Commit> {
+        let same = match write {
+            Write::Key { layer, place, code } => self.saved_code_at(*layer, *place) == Some(*code),
+            Write::TapDance { index, entry } => {
+                self.saved.tap_dances.get(usize::from(*index)) == Some(entry)
+            }
+            Write::Combo { index, entry } => {
+                self.saved.combos.get(usize::from(*index)) == Some(entry)
+            }
+            Write::Macros(macros) => self.saved.macros == *macros,
+        };
+        if same {
             return Ok(Commit::Same);
         }
-        if self.locked {
+        if self.locked && self.needs_unlock(write) {
             return Ok(Commit::Holding(Hold {
                 prompt: String::new(),
             }));
         }
+        match write {
+            Write::Key { layer, place, code } => self.commit_key(*layer, *place, *code)?,
+            Write::TapDance { index, entry } => {
+                if usize::from(*index) >= self.saved.tap_dances.len() {
+                    return Err(Error::Protocol("tap dance index"));
+                }
+                self.exchange(&Ask::SetTapDance {
+                    index: *index,
+                    words: entry.words(),
+                })?;
+                self.saved.tap_dances[usize::from(*index)] = *entry;
+            }
+            Write::Combo { index, entry } => {
+                if usize::from(*index) >= self.saved.combos.len() {
+                    return Err(Error::Protocol("combo index"));
+                }
+                self.exchange(&Ask::SetCombo {
+                    index: *index,
+                    words: entry.keys,
+                })?;
+                self.saved.combos[usize::from(*index)] = *entry;
+            }
+            Write::Macros(macros) => self.commit_macros(macros)?,
+        }
+        Ok(Commit::Stored)
+    }
+
+    fn commit_key(&mut self, layer: u8, place: Place, code: u16) -> Result<()> {
         match place {
             Place::Matrix { row, col } => {
                 self.exchange(&Ask::SetKey {
@@ -887,10 +1408,10 @@ impl Board {
                     code,
                 })?;
                 let index = self.keymap.cell(layer, row, col);
-                if index >= self.keymap.matrix.len() {
+                if index >= self.saved.matrix.len() {
                     return Err(Error::Protocol("keycode is outside the matrix"));
                 }
-                self.keymap.matrix[index] = code;
+                self.saved.matrix[index] = code;
             }
             Place::Encoder { index, direction } => {
                 self.exchange(&Ask::SetEncoder {
@@ -900,7 +1421,7 @@ impl Board {
                     code,
                 })?;
                 let slot = self
-                    .keymap
+                    .saved
                     .encoders
                     .get_mut(layer as usize)
                     .and_then(|row| row.get_mut(index as usize))
@@ -912,25 +1433,144 @@ impl Board {
                 }
             }
         }
-        Ok(Commit::Stored)
+        Ok(())
     }
 
-    pub(super) fn poll_unlock(&mut self) -> Result<Option<Hold>> {
-        let Reply::Unlock { unlocked, pairs } = self.exchange(&Ask::UnlockPoll)? else {
+    /// Sends only the 28-byte chunks that differ from what the board holds.
+    fn commit_macros(&mut self, macros: &[Vec<Action>]) -> Result<()> {
+        let bytes = entries::encode_macros(macros);
+        if bytes.len() > self.entries.macro_memory {
+            return Err(Error::Protocol("the macros do not fit the macro buffer"));
+        }
+        for (number, chunk) in bytes.chunks(usize::from(CHUNK)).enumerate() {
+            let offset = number * usize::from(CHUNK);
+            if self.entries.macro_bytes.get(offset..offset + chunk.len()) == Some(chunk) {
+                continue;
+            }
+            let mut data = [0u8; CHUNK as usize];
+            data[..chunk.len()].copy_from_slice(chunk);
+            self.exchange(&Ask::SetMacroChunk {
+                offset: offset as u16,
+                len: chunk.len() as u8,
+                data,
+            })?;
+        }
+        let cache = &mut self.entries.macro_bytes;
+        if cache.len() < bytes.len() {
+            cache.resize(bytes.len(), 0);
+        }
+        cache[..bytes.len()].copy_from_slice(&bytes);
+        self.saved.macros = macros.to_vec();
+        Ok(())
+    }
+
+    /// Still locked. The hold line keeps the names `begin_hold` wrote, and the countdown moves.
+    pub(super) fn poll_unlock(&mut self) -> Result<bool> {
+        let Reply::Polled { unlocked, left } = self.exchange(&Ask::UnlockPoll)? else {
             return Err(Error::Protocol("unlock poll"));
         };
         self.locked = !unlocked;
-        if self.locked {
-            Ok(Some(Hold {
-                prompt: pairs_text(&pairs),
-            }))
+        self.unlock_left = Some(left);
+        Ok(self.locked)
+    }
+
+    fn hold_prompt(&self, write: &Write, pairs: &[(u8, u8)]) -> String {
+        let (layer, next) = match write {
+            Write::Key { layer, code, .. } => (*layer, catalog::legend(&self.catalog, *code)),
+            Write::TapDance { index, .. } => (0, format!("TD({index})")),
+            Write::Combo { index, .. } => (0, format!("combo {index}")),
+            Write::Macros(_) => (0, "the macros".to_string()),
+        };
+        let keys = self.hold_names(layer, pairs);
+        if keys.is_empty() {
+            format!("hold the unlock keys to write {next}")
         } else {
-            Ok(None)
+            format!("hold {keys} to write {next}")
         }
     }
 
-    pub(super) fn search(&self, query: &str) -> Vec<catalog::Found> {
-        catalog::search(&self.catalog, query)
+    pub(super) fn tap_dances(&self) -> &[TapDance] {
+        &self.entries.tap_dances
+    }
+
+    pub(super) fn combos(&self) -> &[Combo] {
+        &self.entries.combos
+    }
+
+    pub(super) fn macros(&self) -> &[Vec<Action>] {
+        &self.entries.macros
+    }
+
+    /// Bytes the macros would take, and the buffer size.
+    pub(super) fn macro_room(&self, macros: &[Vec<Action>]) -> (usize, usize) {
+        (
+            entries::encode_macros(macros).len(),
+            self.entries.macro_memory,
+        )
+    }
+
+    pub(super) fn legend(&self, code: u16) -> String {
+        catalog::legend(&self.catalog, code)
+    }
+
+    /// Each editor the board has entries for, after the layer tabs.
+    pub(super) fn editors(&self) -> Vec<Tab> {
+        let mut tabs = Vec::new();
+        if !self.entries.tap_dances.is_empty() {
+            tabs.push(Tab::TapDance);
+        }
+        if !self.entries.combos.is_empty() {
+            tabs.push(Tab::Combos);
+        }
+        if !self.entries.macros.is_empty() {
+            tabs.push(Tab::Macros);
+        }
+        tabs
+    }
+
+    fn hold_names(&self, layer: u8, pairs: &[(u8, u8)]) -> String {
+        let mut seen = Vec::new();
+        let mut names = Vec::new();
+        for &(row, col) in pairs {
+            if row >= self.keymap.rows || col >= self.keymap.cols || seen.contains(&(row, col)) {
+                continue;
+            }
+            seen.push((row, col));
+            names.push(self.hold_key_name(layer, row, col));
+        }
+        names.join("+")
+    }
+
+    fn hold_key_name(&self, layer: u8, row: u8, col: u8) -> String {
+        let place = Place::Matrix { row, col };
+        for keys in &self.def.rows {
+            for key in keys {
+                if !layout::visible(&self.def, self.options, key)
+                    || layout::place_of(key) != Some(place)
+                {
+                    continue;
+                }
+                if !key.labels[1].is_empty() {
+                    return key.labels[1].clone();
+                }
+                // What the keyboard holds, not the draft: these are the keys to press now.
+                let name =
+                    catalog::legend(&self.catalog, self.saved_code_at(layer, place).unwrap_or(0));
+                if !name.is_empty() && name != "NO" {
+                    return name;
+                }
+                return format!("{row},{col}");
+            }
+        }
+        format!("{row},{col}")
+    }
+
+    pub(super) fn list(&self, range: catalog::Range<'_>) -> catalog::Listed {
+        catalog::list(&self.catalog, range)
+    }
+
+    pub(super) fn shelf_count(&self) -> usize {
+        catalog::shelf_count(&self.catalog)
     }
 
     pub(super) fn hold_first(&self, code: u16) -> bool {
@@ -939,35 +1579,47 @@ impl Board {
 
     pub(super) fn nudge(&self, _layer: u8, selection: Option<Place>, dir: Dir) -> Option<Place> {
         let targets = self.targets();
+        if targets.is_empty() {
+            return None;
+        }
+        let bands = layout::band_of(&targets.iter().map(|target| target.cy).collect::<Vec<_>>());
         let Some(current) =
             selection.and_then(|place| targets.iter().position(|target| target.place == place))
         else {
-            return targets.first().map(|target| target.place);
+            return top_left(&targets, &bands);
         };
-        let origin = (targets[current].cx, targets[current].cy);
-        let mut best: Option<(f64, f64, usize, Place)> = None;
-        for (index, target) in targets.iter().enumerate() {
-            if index == current {
-                continue;
+        let here = &targets[current];
+        let band = bands[current];
+        let chosen = match dir {
+            Dir::Right => targets
+                .iter()
+                .enumerate()
+                .filter(|(index, target)| bands[*index] == band && target.cx > here.cx)
+                .min_by(|(_, a), (_, b)| a.cx.total_cmp(&b.cx)),
+            Dir::Left => targets
+                .iter()
+                .enumerate()
+                .filter(|(index, target)| bands[*index] == band && target.cx < here.cx)
+                .max_by(|(_, a), (_, b)| a.cx.total_cmp(&b.cx)),
+            Dir::Down => targets
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| bands[*index] == band + 1)
+                .min_by(|(_, a), (_, b)| (a.cx - here.cx).abs().total_cmp(&(b.cx - here.cx).abs())),
+            Dir::Up => {
+                let Some(above) = band.checked_sub(1) else {
+                    return Some(here.place);
+                };
+                targets
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| bands[*index] == above)
+                    .min_by(|(_, a), (_, b)| {
+                        (a.cx - here.cx).abs().total_cmp(&(b.cx - here.cx).abs())
+                    })
             }
-            let point = (target.cx, target.cy);
-            if !facing(dir, origin, point) {
-                continue;
-            }
-            let primary = dist2(origin, point);
-            let perp = perpendicular(dir, origin, point);
-            let replace = match best {
-                None => true,
-                Some((best_primary, best_perp, best_index, _)) => nearer(
-                    (primary, perp, index),
-                    (best_primary, best_perp, best_index),
-                ),
-            };
-            if replace {
-                best = Some((primary, perp, index, target.place));
-            }
-        }
-        best.map(|(_, _, _, place)| place).or(selection)
+        };
+        Some(chosen.map(|(_, target)| target.place).unwrap_or(here.place))
     }
 
     pub(super) fn layer_count(&self) -> u8 {
@@ -975,67 +1627,553 @@ impl Board {
     }
 
     pub(super) fn text(&self, paint: &Paint<'_>) -> String {
+        let frame = self.frame(paint);
+        if let Some(spot) = paint.spot {
+            return layout::render_sheet(&self.sheet(spot), frame);
+        }
         let mut caps = Vec::new();
-        for (row, keys) in self.def.rows.iter().enumerate() {
+        for keys in &self.def.rows {
             for key in keys {
                 if !layout::visible(&self.def, self.options, key) {
                     continue;
                 }
                 let place = layout::place_of(key);
+                let code = place.and_then(|place| self.code_at(paint.layer, place));
                 let legend = if !key.labels[1].is_empty() {
                     key.labels[1].clone()
-                } else if let Some(place) = place {
-                    catalog::legend(&self.catalog, self.code_at(paint.layer, place).unwrap_or(0))
+                } else if place.is_some() {
+                    catalog::legend(&self.catalog, code.unwrap_or(0))
                 } else if !key.labels[0].is_empty() {
                     key.labels[0].clone()
                 } else {
                     String::new()
                 };
+                let tone = if key.decal {
+                    Tone::Decal
+                } else if place.is_some() {
+                    catalog::tone(code.unwrap_or(0))
+                } else {
+                    Tone::Key
+                };
+                let (x, _) = layout::world_point(key, key.x, key.y);
                 caps.push(Cap {
-                    row,
                     place,
                     legend,
                     selected: place.is_some() && paint.selection == place,
+                    unlock: paint.hold.is_some()
+                        && self.locked
+                        && matches!(place, Some(Place::Matrix { row, col }) if self.unlock.contains(&(row, col))),
+                    changed: place.is_some_and(|place| {
+                        self.code_at(paint.layer, place) != self.saved_code_at(paint.layer, place)
+                    }),
                     decal: key.decal,
-                    x: key.x,
-                    y: key.y,
+                    tone,
+                    x,
+                    y: layout::world_top(key),
                     w: key.w,
                     h: key.h,
                 });
             }
         }
+        let detail = paint.selection.map(|place| self.detail(paint.layer, place));
         layout::render_board(
-            &self.name,
             paint.layer.saturating_add(1),
             self.layer_count(),
-            self.locked,
             &caps,
-            paint.hold,
-            paint.query,
-            paint.hits,
-            paint.cursor,
-            paint.cols,
-            paint.rows,
+            detail.as_ref(),
+            frame,
+        )
+    }
+
+    /// The selected key: its name and code, what it does, the same key on every layer, and
+    /// what the keyboard holds when the draft differs.
+    fn detail(&self, layer: u8, place: Place) -> layout::Detail {
+        let code = self.code_at(layer, place).unwrap_or(0);
+        let saved = self.saved_code_at(layer, place).unwrap_or(0);
+        let legend = self.legend(code);
+        layout::Detail {
+            token: catalog::token(&self.catalog, code)
+                .filter(|token| !token.eq_ignore_ascii_case(&legend)),
+            legend,
+            code,
+            kind: catalog::kind(code),
+            layers: (0..self.layer_count())
+                .map(|other| {
+                    let code = self.code_at(other, place).unwrap_or(0);
+                    let changed = Some(code) != self.saved_code_at(other, place);
+                    (self.legend(code), other == layer, changed)
+                })
+                .collect(),
+            saved: (saved != code).then(|| self.legend(saved)),
+        }
+    }
+
+    /// The header holds the tabs (`L1`.. then the editors), the lock state, and the unsaved count.
+    fn frame<'a>(&self, paint: &Paint<'a>) -> layout::Frame<'a> {
+        let editors = self.editors();
+        let layers = usize::from(self.layer_count());
+        let mut tabs: Vec<String> = (1..=layers).map(|n| format!("L{n}")).collect();
+        tabs.extend(editors.iter().map(|tab| tab.name().to_string()));
+        let active = match paint.spot {
+            Some(spot) => layers + editors.iter().position(|tab| *tab == spot.tab).unwrap_or(0),
+            None => usize::from(paint.layer),
+        };
+        layout::Frame {
+            header: layout::Header {
+                name: self.name.clone(),
+                tabs,
+                active,
+                locked: Some(self.locked),
+                unsaved: self.pending().len(),
+            },
+            mode: paint.mode,
+            hold: paint.hold.map(|prompt| self.hold_line(prompt)),
+            lower: paint.lower,
+            popup: paint.popup,
+            notice: paint.notice.map(str::to_string),
+            footer: paint.footer,
+            cols: paint.cols,
+            rows: paint.rows,
+        }
+    }
+
+    /// The prompt, then a bar that fills while the firmware counts the hold down from 50.
+    /// A bar that stays empty means the board does not see every unlock key held.
+    fn hold_line(&self, prompt: &str) -> String {
+        let Some(left) = self.unlock_left.filter(|_| self.locked) else {
+            return prompt.to_string();
+        };
+        let done = usize::from(UNLOCK_COUNT.saturating_sub(left)) * 10 / usize::from(UNLOCK_COUNT);
+        format!("{prompt}  {}{}", "▰".repeat(done), "▱".repeat(10 - done))
+    }
+
+    fn sheet(&self, spot: Spot) -> layout::Sheet {
+        let key = |code: u16, changed: bool| SheetCell {
+            text: self.legend(code),
+            tone: catalog::tone(code),
+            changed,
+        };
+        let (header, rows): (Vec<&'static str>, Vec<(String, Vec<SheetCell>)>) = match spot.tab {
+            Tab::TapDance => (
+                vec!["tap", "hold", "double tap", "tap+hold", "term"],
+                self.entries
+                    .tap_dances
+                    .iter()
+                    .zip(&self.saved.tap_dances)
+                    .enumerate()
+                    .map(|(index, (entry, saved))| {
+                        let mut cells: Vec<SheetCell> = (0..4)
+                            .map(|slot| key(entry.keys[slot], entry.keys[slot] != saved.keys[slot]))
+                            .collect();
+                        cells.push(SheetCell {
+                            text: format!("{} ms", entry.term),
+                            tone: Tone::Key,
+                            changed: entry.term != saved.term,
+                        });
+                        (format!("TD({index})"), cells)
+                    })
+                    .collect(),
+            ),
+            Tab::Combos => (
+                vec!["key 1", "key 2", "key 3", "key 4", "output"],
+                self.entries
+                    .combos
+                    .iter()
+                    .zip(&self.saved.combos)
+                    .enumerate()
+                    .map(|(index, (entry, saved))| {
+                        (
+                            format!("combo {index}"),
+                            (0..5)
+                                .map(|slot| {
+                                    key(entry.keys[slot], entry.keys[slot] != saved.keys[slot])
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            Tab::Macros => (
+                Vec::new(),
+                self.entries
+                    .macros
+                    .iter()
+                    .zip(&self.saved.macros)
+                    .enumerate()
+                    .map(|(index, (actions, saved))| {
+                        let changed = actions != saved;
+                        let mut cells: Vec<SheetCell> = actions
+                            .iter()
+                            .map(|action| SheetCell {
+                                changed,
+                                ..self.action_cell(action)
+                            })
+                            .collect();
+                        cells.push(SheetCell {
+                            text: "+".to_string(),
+                            tone: Tone::Trans,
+                            changed: false,
+                        });
+                        (format!("M{index}"), cells)
+                    })
+                    .collect(),
+            ),
+        };
+        let title = format!(
+            "{} {}/{}",
+            spot.tab.name().to_lowercase(),
+            spot.row + 1,
+            rows.len(),
+        );
+        let status = self.spot_status(spot, &header, &rows);
+        layout::Sheet {
+            title,
+            header,
+            rows,
+            row: spot.row,
+            col: spot.col,
+            status,
+        }
+    }
+
+    fn action_cell(&self, action: &Action) -> SheetCell {
+        let (text, tone) = match action {
+            Action::Text(text) => (format!("\"{text}\""), Tone::Key),
+            Action::Tap(code) => (self.legend(*code), catalog::tone(*code)),
+            Action::Down(code) => (format!("↓{}", self.legend(*code)), catalog::tone(*code)),
+            Action::Up(code) => (format!("↑{}", self.legend(*code)), catalog::tone(*code)),
+            Action::Delay(ms) => (format!("{ms} ms"), Tone::Trans),
+        };
+        SheetCell {
+            text,
+            tone,
+            changed: false,
+        }
+    }
+
+    fn spot_status(
+        &self,
+        spot: Spot,
+        header: &[&str],
+        rows: &[(String, Vec<SheetCell>)],
+    ) -> String {
+        let Some((label, cells)) = rows.get(spot.row) else {
+            return String::new();
+        };
+        if spot.tab != Tab::Macros {
+            let field = header.get(spot.col).copied().unwrap_or("");
+            let value = cells.get(spot.col).map_or("", |cell| cell.text.as_str());
+            return format!("{label} {field}: {value}");
+        }
+        let actions = &self.entries.macros[spot.row];
+        let (used, memory) = self.macro_room(&self.entries.macros);
+        let what = match actions.get(spot.col) {
+            Some(Action::Text(text)) => format!("type \"{text}\""),
+            Some(Action::Tap(code)) => format!("tap {}", self.legend(*code)),
+            Some(Action::Down(code)) => format!("press {}", self.legend(*code)),
+            Some(Action::Up(code)) => format!("release {}", self.legend(*code)),
+            Some(Action::Delay(ms)) => format!("wait {ms} ms"),
+            None => {
+                return format!(
+                    "{label} add a step: t tap  p press  r release  s text  w wait  ({used}/{memory} bytes)"
+                )
+            }
+        };
+        format!(
+            "{label} step {}/{}: {what}  ({used}/{memory} bytes)",
+            spot.col + 1,
+            actions.len() + 1
         )
     }
 
     pub(super) fn first_selectable(&self) -> Option<Place> {
-        self.targets().first().map(|target| target.place)
+        let targets = self.targets();
+        let bands = layout::band_of(&targets.iter().map(|target| target.cy).collect::<Vec<_>>());
+        top_left(&targets, &bands)
     }
 
+    pub(super) fn last_selectable(&self) -> Option<Place> {
+        let targets = self.targets();
+        let bands = layout::band_of(&targets.iter().map(|target| target.cy).collect::<Vec<_>>());
+        bottom_right(&targets, &bands)
+    }
+
+    /// The draft code, which is what the screen shows.
     fn code_at(&self, layer: u8, place: Place) -> Option<u16> {
-        match place {
-            Place::Matrix { row, col } => {
-                let index = self.keymap.cell(layer, row, col);
-                self.keymap.matrix.get(index).copied()
+        code_in(
+            &self.keymap.matrix,
+            &self.keymap.encoders,
+            &self.keymap,
+            layer,
+            place,
+        )
+    }
+
+    fn saved_code_at(&self, layer: u8, place: Place) -> Option<u16> {
+        code_in(
+            &self.saved.matrix,
+            &self.saved.encoders,
+            &self.keymap,
+            layer,
+            place,
+        )
+    }
+
+    /// Puts a change in the draft. Nothing reaches the keyboard until `commit`.
+    pub(super) fn stage(&mut self, write: Write) {
+        let before = self.draft_of(&write);
+        if before == write {
+            return;
+        }
+        self.apply(&write);
+        self.undo.push(before);
+    }
+
+    /// Takes back the newest staged change. `false` when there is none.
+    pub(super) fn undo(&mut self) -> bool {
+        let Some(before) = self.undo.pop() else {
+            return false;
+        };
+        self.apply(&before);
+        true
+    }
+
+    /// The draft becomes what the keyboard holds.
+    pub(super) fn discard(&mut self) {
+        self.keymap.matrix.clone_from(&self.saved.matrix);
+        self.keymap.encoders.clone_from(&self.saved.encoders);
+        self.entries.tap_dances.clone_from(&self.saved.tap_dances);
+        self.entries.combos.clone_from(&self.saved.combos);
+        self.entries.macros.clone_from(&self.saved.macros);
+        self.undo.clear();
+    }
+
+    /// Every write that would make the keyboard match the draft. Macros count as one.
+    pub(super) fn pending(&self) -> Vec<Write> {
+        let mut out = Vec::new();
+        let cols = usize::from(self.keymap.cols);
+        let cells = usize::from(self.keymap.rows) * cols;
+        for (index, (draft, saved)) in self
+            .keymap
+            .matrix
+            .iter()
+            .zip(&self.saved.matrix)
+            .enumerate()
+        {
+            if draft != saved && cells > 0 {
+                let rest = index % cells;
+                out.push(Write::Key {
+                    layer: (index / cells) as u8,
+                    place: Place::Matrix {
+                        row: (rest / cols) as u8,
+                        col: (rest % cols) as u8,
+                    },
+                    code: *draft,
+                });
             }
-            Place::Encoder { index, direction } => {
-                let slot = self
-                    .keymap
-                    .encoders
-                    .get(layer as usize)?
-                    .get(index as usize)?;
-                Some(if direction == 0 { slot.0 } else { slot.1 })
+        }
+        for (layer, (draft, saved)) in self
+            .keymap
+            .encoders
+            .iter()
+            .zip(&self.saved.encoders)
+            .enumerate()
+        {
+            for (index, (d, s)) in draft.iter().zip(saved).enumerate() {
+                for (direction, dc, sc) in [(0u8, d.0, s.0), (1, d.1, s.1)] {
+                    if dc != sc {
+                        out.push(Write::Key {
+                            layer: layer as u8,
+                            place: Place::Encoder {
+                                index: index as u8,
+                                direction,
+                            },
+                            code: dc,
+                        });
+                    }
+                }
+            }
+        }
+        for (index, (draft, saved)) in self
+            .entries
+            .tap_dances
+            .iter()
+            .zip(&self.saved.tap_dances)
+            .enumerate()
+        {
+            if draft != saved {
+                out.push(Write::TapDance {
+                    index: index as u8,
+                    entry: *draft,
+                });
+            }
+        }
+        for (index, (draft, saved)) in self
+            .entries
+            .combos
+            .iter()
+            .zip(&self.saved.combos)
+            .enumerate()
+        {
+            if draft != saved {
+                out.push(Write::Combo {
+                    index: index as u8,
+                    entry: *draft,
+                });
+            }
+        }
+        if self.entries.macros != self.saved.macros {
+            out.push(Write::Macros(self.entries.macros.clone()));
+        }
+        out
+    }
+
+    /// The draft value at the place `write` targets, as a write of its own.
+    fn draft_of(&self, write: &Write) -> Write {
+        match write {
+            Write::Key { layer, place, .. } => Write::Key {
+                layer: *layer,
+                place: *place,
+                code: self.code_at(*layer, *place).unwrap_or(0),
+            },
+            Write::TapDance { index, .. } => Write::TapDance {
+                index: *index,
+                entry: self.entries.tap_dances[usize::from(*index)],
+            },
+            Write::Combo { index, .. } => Write::Combo {
+                index: *index,
+                entry: self.entries.combos[usize::from(*index)],
+            },
+            Write::Macros(_) => Write::Macros(self.entries.macros.clone()),
+        }
+    }
+
+    fn apply(&mut self, write: &Write) {
+        match write {
+            Write::Key { layer, place, code } => match *place {
+                Place::Matrix { row, col } => {
+                    let index = self.keymap.cell(*layer, row, col);
+                    if let Some(slot) = self.keymap.matrix.get_mut(index) {
+                        *slot = *code;
+                    }
+                }
+                Place::Encoder { index, direction } => {
+                    if let Some(slot) = self
+                        .keymap
+                        .encoders
+                        .get_mut(usize::from(*layer))
+                        .and_then(|row| row.get_mut(usize::from(index)))
+                    {
+                        if direction == 0 {
+                            slot.0 = *code;
+                        } else {
+                            slot.1 = *code;
+                        }
+                    }
+                }
+            },
+            Write::TapDance { index, entry } => {
+                self.entries.tap_dances[usize::from(*index)] = *entry;
+            }
+            Write::Combo { index, entry } => self.entries.combos[usize::from(*index)] = *entry,
+            Write::Macros(macros) => self.entries.macros.clone_from(macros),
+        }
+    }
+
+    /// Popup lines for one change: a heading for where, then `was → becomes` per field.
+    /// `from_saved` compares with what the keyboard holds, for the unsaved list on quit;
+    /// otherwise with the draft, for the confirm before staging.
+    pub(super) fn describe(&self, write: &Write, from_saved: bool) -> Vec<PopupLine> {
+        let change = |was: String, now: String| PopupLine::Change(was, now);
+        let key = |name: &str, was: u16, now: u16| {
+            change(format!("{name}  {}", self.legend(was)), self.legend(now))
+        };
+        match write {
+            Write::Key { layer, place, code } => {
+                let at = match place {
+                    Place::Matrix { row, col } => format!("key {row},{col}"),
+                    Place::Encoder { index, direction } => {
+                        let turn = if *direction == 0 { "cw" } else { "ccw" };
+                        format!("encoder {index} {turn}")
+                    }
+                };
+                let was = if from_saved {
+                    self.saved_code_at(*layer, *place)
+                } else {
+                    self.code_at(*layer, *place)
+                };
+                vec![
+                    PopupLine::Heading(format!("layer {} {at}", layer + 1)),
+                    change(self.legend(was.unwrap_or(0)), self.legend(*code)),
+                ]
+            }
+            Write::TapDance { index, entry } => {
+                let list = if from_saved {
+                    &self.saved.tap_dances
+                } else {
+                    &self.entries.tap_dances
+                };
+                let was = list[usize::from(*index)];
+                let names = ["tap", "hold", "double tap", "tap+hold"];
+                let mut lines = vec![PopupLine::Heading(format!("TD({index})"))];
+                lines.extend(
+                    (0..4)
+                        .filter(|slot| was.keys[*slot] != entry.keys[*slot])
+                        .map(|slot| key(names[slot], was.keys[slot], entry.keys[slot])),
+                );
+                if was.term != entry.term {
+                    lines.push(change(
+                        format!("term  {} ms", was.term),
+                        format!("{} ms", entry.term),
+                    ));
+                }
+                lines
+            }
+            Write::Combo { index, entry } => {
+                let list = if from_saved {
+                    &self.saved.combos
+                } else {
+                    &self.entries.combos
+                };
+                let was = list[usize::from(*index)];
+                let names = ["key 1", "key 2", "key 3", "key 4", "output"];
+                let mut lines = vec![PopupLine::Heading(format!("combo {index}"))];
+                lines.extend(
+                    (0..5)
+                        .filter(|slot| was.keys[*slot] != entry.keys[*slot])
+                        .map(|slot| key(names[slot], was.keys[slot], entry.keys[slot])),
+                );
+                lines
+            }
+            Write::Macros(macros) => {
+                let list = if from_saved {
+                    &self.saved.macros
+                } else {
+                    &self.entries.macros
+                };
+                let steps = |actions: &[Action]| {
+                    let text: Vec<String> = actions
+                        .iter()
+                        .map(|action| self.action_cell(action).text)
+                        .collect();
+                    if text.is_empty() {
+                        "(empty)".to_string()
+                    } else {
+                        text.join(" ")
+                    }
+                };
+                macros
+                    .iter()
+                    .zip(list)
+                    .enumerate()
+                    .filter(|(_, (next, now))| next != now)
+                    .flat_map(|(index, (next, now))| {
+                        [
+                            PopupLine::Heading(format!("M{index}")),
+                            change(steps(now), steps(next)),
+                        ]
+                    })
+                    .collect()
             }
         }
     }
@@ -1050,10 +2188,11 @@ impl Board {
                 let Some(place) = layout::place_of(key) else {
                     continue;
                 };
+                let (x, _) = layout::world_point(key, key.x, key.y);
                 targets.push(Target {
                     place,
-                    cx: key.x + key.w / 2.0,
-                    cy: key.y + key.h / 2.0,
+                    cx: x,
+                    cy: layout::world_top(key),
                 });
             }
         }
@@ -1067,35 +2206,30 @@ struct Target {
     cy: f64,
 }
 
-fn nearer(candidate: (f64, f64, usize), best: (f64, f64, usize)) -> bool {
-    candidate
-        .0
-        .total_cmp(&best.0)
-        .then(candidate.1.total_cmp(&best.1))
-        .then(candidate.2.cmp(&best.2))
-        == Ordering::Less
+fn top_left(targets: &[Target], bands: &[usize]) -> Option<Place> {
+    targets
+        .iter()
+        .enumerate()
+        .min_by(|(left, a), (right, b)| {
+            bands[*left]
+                .cmp(&bands[*right])
+                .then(a.cx.total_cmp(&b.cx))
+                .then(left.cmp(right))
+        })
+        .map(|(_, target)| target.place)
 }
 
-fn facing(dir: Dir, from: (f64, f64), to: (f64, f64)) -> bool {
-    match dir {
-        Dir::Right => to.0 > from.0,
-        Dir::Left => to.0 < from.0,
-        Dir::Down => to.1 > from.1,
-        Dir::Up => to.1 < from.1,
-    }
-}
-
-fn dist2(from: (f64, f64), to: (f64, f64)) -> f64 {
-    let dx = to.0 - from.0;
-    let dy = to.1 - from.1;
-    dx * dx + dy * dy
-}
-
-fn perpendicular(dir: Dir, from: (f64, f64), to: (f64, f64)) -> f64 {
-    match dir {
-        Dir::Left | Dir::Right => (to.1 - from.1).abs(),
-        Dir::Up | Dir::Down => (to.0 - from.0).abs(),
-    }
+fn bottom_right(targets: &[Target], bands: &[usize]) -> Option<Place> {
+    targets
+        .iter()
+        .enumerate()
+        .max_by(|(left, a), (right, b)| {
+            bands[*left]
+                .cmp(&bands[*right])
+                .then(a.cx.total_cmp(&b.cx))
+                .then(left.cmp(right))
+        })
+        .map(|(_, target)| target.place)
 }
 
 pub(super) struct Hold {
@@ -1111,10 +2245,15 @@ pub(super) enum Commit {
 pub(super) struct Paint<'a> {
     pub(super) layer: u8,
     pub(super) selection: Option<Place>,
+    /// `None` draws the keymap. `Some` draws that tab's sheet.
+    pub(super) spot: Option<Spot>,
+    /// One line in place of the sheet status, after a write the board cannot take.
+    pub(super) notice: Option<&'a str>,
     pub(super) hold: Option<&'a str>,
-    pub(super) query: Option<&'a str>,
-    pub(super) hits: &'a [String],
-    pub(super) cursor: usize,
+    pub(super) lower: Option<Lower<'a>>,
+    pub(super) popup: Option<&'a Popup>,
+    pub(super) mode: layout::Mode,
+    pub(super) footer: &'a [(String, &'static str)],
     pub(super) cols: u16,
     pub(super) rows: u16,
 }
@@ -1123,10 +2262,34 @@ pub(super) fn pick_text(
     names: &[String],
     cursor: usize,
     failed: Option<usize>,
+    popup: Option<&Popup>,
+    mode: layout::Mode,
+    footer: &[(String, &'static str)],
     cols: u16,
     rows: u16,
 ) -> String {
-    layout::render_pick(names, cursor, failed, cols, rows)
+    layout::render_pick(
+        names,
+        cursor,
+        failed,
+        layout::Frame {
+            header: layout::Header {
+                name: "choose a keyboard".to_string(),
+                tabs: Vec::new(),
+                active: 0,
+                locked: None,
+                unsaved: 0,
+            },
+            mode,
+            hold: None,
+            lower: None,
+            popup,
+            notice: None,
+            footer,
+            cols,
+            rows,
+        },
+    )
 }
 
 fn exchange(io: &mut dyn Io, ask: &Ask) -> Result<Reply> {
@@ -1136,6 +2299,23 @@ fn exchange(io: &mut dyn Io, ask: &Ask) -> Result<Reply> {
 
 fn cell(layer: u8, row: u8, col: u8, rows: u8, cols: u8) -> usize {
     ((layer as usize * rows as usize) + row as usize) * cols as usize + col as usize
+}
+
+/// The code at `place` in one copy of the keymap. `shape` supplies the matrix size.
+fn code_in(
+    matrix: &[u16],
+    encoders: &[Vec<(u16, u16)>],
+    shape: &Keymap,
+    layer: u8,
+    place: Place,
+) -> Option<u16> {
+    match place {
+        Place::Matrix { row, col } => matrix.get(shape.cell(layer, row, col)).copied(),
+        Place::Encoder { index, direction } => {
+            let slot = encoders.get(usize::from(layer))?.get(usize::from(index))?;
+            Some(if direction == 0 { slot.0 } else { slot.1 })
+        }
+    }
 }
 
 fn cell_count(layers: u8, rows: u8, cols: u8) -> Result<usize> {
@@ -1168,4 +2348,97 @@ fn decompress(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).map_err(|_| Error::NoLayout)?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The screen without colors, as a person reads it.
+    fn plain(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                chars.by_ref().find(|c| *c == 'm');
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn one_board_still_asks_which() {
+        let board = MemoryBoard::from_definition(
+            r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
+        )
+        .unwrap()
+        .named("only");
+        let attached = super::super::list_first(vec![board.candidate()]).unwrap();
+        let text = super::super::Model::start(attached).text(40, 8);
+        assert!(text.contains("choose"), "{text}");
+        assert!(text.contains("> only"), "{text}");
+        assert!(!text.contains("layer "), "{text}");
+    }
+
+    #[test]
+    fn hold_names_survive_the_poll() {
+        let board = MemoryBoard::from_definition(
+            r#"{"matrix":{"rows":2,"cols":2},"layouts":{"keymap":[["0,0\n\n\n\n\n\n\n\nTab","0,1"]]}}"#,
+        )
+        .unwrap()
+        .locked(&[(0, 0), (0, 1), (0, 0), (8, 0)]);
+        board.store.borrow_mut().unlock_waits = 1;
+        let mut app = crate::App::new(board.open().unwrap(), crate::TestScreen::new(60, 16));
+        app.handle(crate::Event::Char('/')).unwrap();
+        assert!(app.screen().text().contains("[Basic]"));
+        for ch in "boot".chars() {
+            app.handle(crate::Event::Char(ch)).unwrap();
+        }
+        app.handle(crate::Event::Confirm).unwrap();
+        let text = plain(app.screen().text());
+        assert!(text.contains("╭─ stage this change?"), "{text}");
+        assert!(text.contains("NO  →  Bootloader"), "{text}");
+        app.handle(crate::Event::Confirm).unwrap();
+        // Staged only: the keyboard has nothing yet.
+        assert_eq!(board.store.borrow().matrix[0], 0);
+        assert!(app.screen().text().contains("1 unsaved"));
+        for ch in ":w".chars() {
+            app.handle(crate::Event::Char(ch)).unwrap();
+        }
+        app.handle(crate::Event::Confirm).unwrap();
+        let text = app.screen().text();
+        assert!(text.contains("hold Tab+0,1 to write Bootloader"), "{text}");
+        assert!(!text.contains("8,0"), "{text}");
+        app.handle(crate::Event::Tick).unwrap();
+        let text = app.screen().text();
+        assert!(text.contains("locked"), "{text}");
+        assert!(text.contains("hold Tab+0,1 to write Bootloader"), "{text}");
+        assert!(text.contains('▰'), "the countdown shows: {text}");
+        assert!(!text.contains("2,0"), "{text}");
+        // Corne's stock combo is Tab+Q. Held, it types into the terminal; none of it may act.
+        for event in [
+            crate::Event::Tab,
+            crate::Event::Char('q'),
+            crate::Event::Char('?'),
+        ] {
+            assert_eq!(app.handle(event).unwrap(), crate::Step::Continue);
+        }
+        app.handle(crate::Event::Tick).unwrap();
+        let text = app.screen().text();
+        assert!(text.contains("let go of the keys"), "{text}");
+        // Still typing: `q` would quit the keymap, so it is dropped.
+        assert_eq!(
+            app.handle(crate::Event::Char('q')).unwrap(),
+            crate::Step::Continue
+        );
+        app.handle(crate::Event::Tick).unwrap();
+        assert!(app.screen().text().contains("let go of the keys"));
+        app.handle(crate::Event::Tick).unwrap();
+        let text = app.screen().text();
+        assert!(text.contains("ready"), "{text}");
+        // Written after the unlock, so the firmware kept it rather than firewalling it.
+        assert_eq!(board.store.borrow().matrix[0], QK_BOOT);
+    }
 }

@@ -3,6 +3,12 @@ name = "lazyvial"
 version = "0.1.0"
 edition = "2021"
 description = "Remap a Vial keyboard from the terminal"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/imjma/lazyvial"
+homepage = "https://github.com/imjma/lazyvial"
+readme = "README.md"
+keywords = ["vial", "qmk", "keyboard", "keymap", "tui"]
+categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
 crossterm = "0.28"

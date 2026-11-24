@@ -13,6 +13,7 @@ pub struct TestScreen {
     cols: u16,
     rows: u16,
     last: String,
+    paints: u32,
 }
 
 impl TestScreen {
@@ -21,16 +22,23 @@ impl TestScreen {
             cols,
             rows,
             last: String::new(),
+            paints: 0,
         }
     }
 
     pub fn text(&self) -> &str {
         &self.last
     }
+
+    /// How many times the shell asked this screen to draw.
+    pub fn paints(&self) -> u32 {
+        self.paints
+    }
 }
 
 impl Screen for TestScreen {
     fn paint(&mut self, text: &str) {
+        self.paints = self.paints.saturating_add(1);
         self.last = text.to_string();
     }
 
@@ -47,12 +55,17 @@ impl Screen for TestScreen {
 pub struct App<S: Screen> {
     screen: S,
     model: Model,
+    shown: String,
 }
 
 impl<S: Screen> App<S> {
     pub fn new(attached: Attached, screen: S) -> Self {
         let model = Model::start(attached);
-        let mut app = Self { screen, model };
+        let mut app = Self {
+            screen,
+            model,
+            shown: String::new(),
+        };
         app.paint();
         app
     }
@@ -69,6 +82,10 @@ impl<S: Screen> App<S> {
 
     fn paint(&mut self) {
         let text = self.model.text(self.screen.cols(), self.screen.rows());
+        if text == self.shown {
+            return;
+        }
+        self.shown = text.clone();
         self.screen.paint(&text);
     }
 }
