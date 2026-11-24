@@ -410,7 +410,7 @@ fn shelves_switch_and_typing_searches() -> lazyvial::Result<()> {
     app.handle(lazyvial::Event::Right)?;
     let quantum = app.screen().text();
     assert!(quantum.contains("[Quantum]"), "{quantum}");
-    assert!(quantum.contains("> Bootloader"), "{quantum}");
+    assert!(quantum.contains("> Boot"), "{quantum}");
     for _ in 0..4 {
         app.handle(lazyvial::Event::Left)?;
     }

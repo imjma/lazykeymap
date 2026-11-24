@@ -1271,7 +1271,8 @@ fn fill(text: &str, width: usize, bg: Rgb, fg: Rgb, bold: bool) -> String {
 }
 
 /// `MO(1)` is header `MO` and main `1`. `C-A` is header `C` and main `A`.
-/// A legend with no split stays on the main line, and wraps when it is wider than the cap.
+/// A legend with no split stays on the main line. Wider than the cap, it wraps at the space that
+/// fits both halves most evenly, else at the middle.
 fn cap_lines(legend: &str, room: usize) -> (String, String) {
     let room = room.max(1);
     if let Some((head, tail)) = legend.split_once('(') {
@@ -1294,6 +1295,14 @@ fn cap_lines(legend: &str, room: usize) -> (String, String) {
     }
     if fits(legend, room) {
         return (String::new(), legend.to_string());
+    }
+    let best = legend
+        .match_indices(' ')
+        .map(|(at, _)| (&legend[..at], &legend[at + 1..]))
+        .filter(|(top, bottom)| fits(top, room) && fits(bottom, room))
+        .min_by_key(|(top, bottom)| top.chars().count().max(bottom.chars().count()));
+    if let Some((top, bottom)) = best {
+        return (top.to_string(), bottom.to_string());
     }
     let mid = legend.chars().count().div_ceil(2);
     let top: String = legend.chars().take(mid).collect();
@@ -1972,6 +1981,13 @@ mod tests {
             w: 1.0,
             h: 1.0,
         }
+    }
+
+    #[test]
+    fn wide_legends_wrap_at_a_space() {
+        assert_eq!(cap_lines("Sec Unlk", 6), ("Sec".into(), "Unlk".into()));
+        assert_eq!(cap_lines("SH Tap Tog", 6), ("SH Tap".into(), "Tog".into()));
+        assert_eq!(cap_lines("Bootloader", 6), ("Bootl".into(), "oader".into()));
     }
 
     #[test]

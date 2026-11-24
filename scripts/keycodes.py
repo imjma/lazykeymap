@@ -48,39 +48,111 @@ WORDS = {
     "KC_NONUS_HASH": "ISO #", "KC_NONUS_BACKSLASH": "ISO \\",
     "KC_AUDIO_MUTE": "Mute", "KC_AUDIO_VOL_UP": "Vol +", "KC_AUDIO_VOL_DOWN": "Vol -",
     "KC_KB_MUTE": "KB Mute", "KC_KB_VOLUME_UP": "KB Vol +", "KC_KB_VOLUME_DOWN": "KB Vol -",
-    "KC_MEDIA_NEXT_TRACK": "Next", "KC_MEDIA_PREV_TRACK": "Prev", "KC_MEDIA_STOP": "Stop Media",
+    "KC_MEDIA_NEXT_TRACK": "Next", "KC_MEDIA_PREV_TRACK": "Prev", "KC_MEDIA_STOP": "Stop",
     "KC_MEDIA_PLAY_PAUSE": "Play", "KC_MEDIA_FAST_FORWARD": "Fwd", "KC_MEDIA_REWIND": "Rewind",
     "KC_BRIGHTNESS_UP": "Bri +", "KC_BRIGHTNESS_DOWN": "Bri -",
     "KC_SYSTEM_POWER": "Power", "KC_SYSTEM_SLEEP": "Sleep", "KC_SYSTEM_WAKE": "Wake",
-    "QK_BOOTLOADER": "Bootloader", "QK_CLEAR_EEPROM": "Clear EEPROM",
-    "QK_GRAVE_ESCAPE": "Esc / ~",
-    "QK_SPACE_CADET_LEFT_CTRL_PARENTHESIS_OPEN": "LCtrl / (",
-    "QK_SPACE_CADET_RIGHT_CTRL_PARENTHESIS_CLOSE": "RCtrl / )",
-    "QK_SPACE_CADET_LEFT_SHIFT_PARENTHESIS_OPEN": "LShift / (",
-    "QK_SPACE_CADET_RIGHT_SHIFT_PARENTHESIS_CLOSE": "RShift / )",
-    "QK_SPACE_CADET_LEFT_ALT_PARENTHESIS_OPEN": "LAlt / (",
-    "QK_SPACE_CADET_RIGHT_ALT_PARENTHESIS_CLOSE": "RAlt / )",
-    "QK_SPACE_CADET_RIGHT_SHIFT_ENTER": "RShift / Enter",
+    "QK_CLEAR_EEPROM": "Clear EEPROM", "KC_KP_EQUAL_AS400": "AS400 =",
+    "QK_GRAVE_ESCAPE": "Esc ~",
+    "QK_SPACE_CADET_LEFT_CTRL_PARENTHESIS_OPEN": "LCtl (",
+    "QK_SPACE_CADET_RIGHT_CTRL_PARENTHESIS_CLOSE": "RCtl )",
+    "QK_SPACE_CADET_LEFT_SHIFT_PARENTHESIS_OPEN": "LSft (",
+    "QK_SPACE_CADET_RIGHT_SHIFT_PARENTHESIS_CLOSE": "RSft )",
+    "QK_SPACE_CADET_LEFT_ALT_PARENTHESIS_OPEN": "LAlt (",
+    "QK_SPACE_CADET_RIGHT_ALT_PARENTHESIS_CLOSE": "RAlt )",
+    "QK_SPACE_CADET_RIGHT_SHIFT_ENTER": "RSft Enter",
     "QK_REPEAT_KEY": "Repeat", "QK_ALT_REPEAT_KEY": "Alt Repeat",
     "QK_CAPS_WORD_TOGGLE": "Caps Word",
     "QK_DYNAMIC_MACRO_RECORD_START_1": "DM Rec 1", "QK_DYNAMIC_MACRO_RECORD_START_2": "DM Rec 2",
     "QK_DYNAMIC_MACRO_RECORD_STOP": "DM Stop", "QK_DYNAMIC_MACRO_PLAY_1": "DM Play 1",
     "QK_DYNAMIC_MACRO_PLAY_2": "DM Play 2",
 }
-UPPER = {"RGB", "LED", "NKRO", "GUI", "EEPROM", "BSD", "WWW", "KB", "LCTL", "LGUI",
-         "RCTL", "RGUI", "LALT", "RALT", "CTL", "ALT", "MIDI", "CC", "BL"}
+UPPER = {"RGB", "LED", "NKRO", "GUI", "EEPROM", "BSD", "KB", "LCTL", "LGUI", "RCTL", "RGUI",
+         "LALT", "RALT", "CTL", "ALT", "BL", "TT", "UC", "AS", "SH", "KO", "OS", "AC", "UG", "PC", "DM"}
 SIDE = {"LEFT": "L", "RIGHT": "R"}
 MODS = {"CTRL": "Ctrl", "SHIFT": "Shift", "ALT": "Alt", "GUI": "Gui"}
 
 
+# Keycaps draw two lines of about six columns, so long QMK words get short forms.
+PHRASES = [
+    ("DYNAMIC_TAPPING_TERM", "TT"), ("UNICODE_MODE", "UC"), ("AUTO_SHIFT", "AS"),
+    ("SWAP_HANDS", "SH"), ("KEY_OVERRIDE", "KO"), ("ONE_SHOT", "OS"), ("AUTOCORRECT", "AC"),
+    ("RGB_MATRIX", "RGB"), ("LED_MATRIX", "LED"), ("UNDERGLOW", "UG"), ("BACKLIGHT", "BL"),
+    ("TRI_LAYER", "Tri"), ("CAPS_LOCK", "Caps"), ("NUM_LOCK", "Num"), ("SCROLL_LOCK", "Scrl"),
+    ("ALL_NOTES_OFF", "Notes Off"), ("PITCH_BEND", "Bend"), ("MODE_NEXT", "Next"),
+    ("MODE_PREVIOUS", "Prev"), ("SYSTEM_REQUEST", "SysRq"), ("MY_COMPUTER", "My PC"),
+    ("MISSION_CONTROL", "Msn Ctl"), ("CONTROL_PANEL", "Ctl Panel"),
+    ("FEEDBACK_TOGGLE", "Fdbk"), ("BUZZ_TOGGLE", "Buzz"), ("CONTINUOUS_TOGGLE", "Cont"),
+    ("DWELL", "Dwl"), ("AUDIO_CLICKY", "Click"), ("AUDIO_VOICE", "Voice"),
+    ("FLAG_NEXT", "Flag+"), ("FLAG_PREVIOUS", "Flag-"), ("RGB_MODE", "RGB"),
+]
+ABBR = {
+    "TOGGLE": "Tog", "PREVIOUS": "Prev", "BRIGHTNESS": "Bri", "SATURATION": "Sat",
+    "VALUE": "Val", "SPEED": "Spd", "UP": "+", "DOWN": "-", "HAPTIC": "Hap",
+    "AUDIO": "Aud", "CLICKY": "Click", "CONTINUOUS": "Cont", "FEEDBACK": "Fdbk",
+    "REPORT": "Rpt", "REQUEST": "Req", "UNLOCK": "Unlk", "SECURE": "Sec",
+    "BREATHING": "Breath", "MOMENTARY": "Mom", "TRANSPOSE": "Trans", "VELOCITY": "Vel",
+    "CHANNEL": "Ch", "OCTAVE": "Oct", "MODULATION": "Mod", "PORTAMENTO": "Port",
+    "SOSTENUTO": "Sost", "SUSTAIN": "Sus", "LEGATO": "Legato", "WINCOMPOSE": "WinC",
+    "WINDOWS": "Win", "MACOS": "Mac", "VELOCIKEY": "Velo", "RGBTEST": "Test",
+    "GRADIENT": "Grad", "RAINBOW": "Rainbw", "BREATHE": "Breath", "TWINKLE": "Twinkl",
+    "EXECUTE": "Exec", "ALTERNATE": "Alt", "SEPARATOR": "Sep", "CALCULATOR": "Calc",
+    "WWW": "Web", "FAVORITES": "Favs", "REFRESH": "Reload", "FORWARD": "Fwd",
+    "ASSISTANT": "Asst", "LAUNCHPAD": "LPad", "LOCKING": "Lk", "BOOTLOADER": "Boot",
+    "PREV": "Prev", "TRACK": "", "MEDIA": "", "MIDI": "", "SHIFT": "Sft",
+}
+
+
 def humanize(name):
-    words = re.sub(r"^(KC|QK)_", "", name).split("_")
-    return " ".join(w if w in UPPER else w.capitalize() for w in words)
+    rest = re.sub(r"^(KC|QK)_", "", name)
+    for long, short in PHRASES:
+        rest = rest.replace(long, short.replace(" ", "_"))
+    words = [ABBR.get(w, w) for w in rest.split("_")]
+    return " ".join(w.capitalize() if w.isalpha() and w.isupper() and w not in UPPER else w for w in words if w)
+
+
+MAGIC_PAIR = {
+    "CONTROL_CAPS_LOCK": "CtlCap", "LALT_LGUI": "LA/LG", "RALT_RGUI": "RA/RG", "ALT_GUI": "A/G",
+    "LCTL_LGUI": "LC/LG", "RCTL_RGUI": "RC/RG", "CTL_GUI": "C/G", "GRAVE_ESC": "`/Esc",
+    "BACKSLASH_BACKSPACE": "\\/Bksp", "ESCAPE_CAPS_LOCK": "EscCap",
+}
+
+
+def magic(name):
+    rest = name.removeprefix("QK_MAGIC_")
+    m = re.fullmatch(r"(SWAP|UNSWAP|TOGGLE)_(\w+)", rest)
+    if m and m.group(2) in MAGIC_PAIR:
+        return f"{MAGIC_PAIR[m.group(2)]} {dict(SWAP='Swap', UNSWAP='Norm', TOGGLE='Tog')[m.group(1)]}"
+    m = re.fullmatch(r"CAPS_LOCK_AS_CONTROL_(ON|OFF)", rest)
+    if m:
+        return f"CapCtl {m.group(1).capitalize()}"
+    m = re.fullmatch(r"(?:TOGGLE_)?(GUI|NKRO)(?:_(ON|OFF))?", rest)
+    if m:
+        return f"{m.group(1)} {(m.group(2) or 'Tog').capitalize()}"
+    m = re.fullmatch(r"EE_HANDS_(LEFT|RIGHT)", rest)
+    if m:
+        return f"EEH {m.group(1)[0]}"
+    return humanize(name)
+
+
+CAP = 6
+
+
+def fits_cap(text):
+    """Mirror of layout.rs `cap_lines`: one line, `head(main)`, or two lines split at a space."""
+    if len(text) <= CAP:
+        return True
+    m = re.fullmatch(r"(.+?)\((.+)\)", text)
+    if m and len(m.group(1)) <= CAP and len(m.group(2)) <= CAP:
+        return True
+    return any(text[i] == " " and len(text[:i]) <= CAP and len(text[i + 1 :]) <= CAP for i in range(len(text)))
 
 
 def legend(name):
     if name in WORDS:
         return WORDS[name]
+    if name.startswith("QK_MAGIC_"):
+        return magic(name)
     m = re.fullmatch(r"KC_(\w|F\d+)", name)
     if m:
         return m.group(1)
@@ -166,6 +238,10 @@ TABLES = {
     "MACRO_DYNAMIC": keys(DYNAMIC),
     "LAYER": keys(LAYER_KEYS),
 }
+
+too_wide = [label for rows in TABLES.values() for _, label, _ in rows if not fits_cap(label)]
+if too_wide:
+    sys.exit(f"legends wider than a {CAP}-column keycap: {too_wide}")
 
 rev = subprocess.run(["git", "-C", str(qmk), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 version = re.search(r'QMK_KEYCODES_VERSION "([\d.]+)"', keycodes_h).group(1)

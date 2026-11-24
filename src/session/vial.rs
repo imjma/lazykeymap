@@ -2399,7 +2399,7 @@ mod tests {
         app.handle(crate::Event::Confirm).unwrap();
         let text = plain(app.screen().text());
         assert!(text.contains("╭─ stage this change?"), "{text}");
-        assert!(text.contains("NO  →  Bootloader"), "{text}");
+        assert!(text.contains("NO  →  Boot"), "{text}");
         app.handle(crate::Event::Confirm).unwrap();
         // Staged only: the keyboard has nothing yet.
         assert_eq!(board.store.borrow().matrix[0], 0);
@@ -2409,12 +2409,12 @@ mod tests {
         }
         app.handle(crate::Event::Confirm).unwrap();
         let text = app.screen().text();
-        assert!(text.contains("hold Tab+0,1 to write Bootloader"), "{text}");
+        assert!(text.contains("hold Tab+0,1 to write Boot"), "{text}");
         assert!(!text.contains("8,0"), "{text}");
         app.handle(crate::Event::Tick).unwrap();
         let text = app.screen().text();
         assert!(text.contains("locked"), "{text}");
-        assert!(text.contains("hold Tab+0,1 to write Bootloader"), "{text}");
+        assert!(text.contains("hold Tab+0,1 to write Boot"), "{text}");
         assert!(text.contains('▰'), "the countdown shows: {text}");
         assert!(!text.contains("2,0"), "{text}");
         // Corne's stock combo is Tab+Q. Held, it types into the terminal; none of it may act.
