@@ -8,8 +8,11 @@ With Homebrew, on macOS or Linux:
 
 ```sh
 brew tap imjma/lazyvial https://github.com/imjma/lazyvial
+brew trust imjma/lazyvial
 brew install lazyvial
 ```
+
+Homebrew 7 refuses formulae from a tap until you trust it, hence the middle line. `brew upgrade lazyvial` picks up new releases.
 
 From source, with a Rust toolchain:
 
@@ -38,3 +41,15 @@ Changes stay in a draft, shown in green, until `:w`. Quitting with unsaved chang
 ## License
 
 GPL-2.0-or-later. The keycode table is transcribed from [vial-gui](https://github.com/vial-kb/vial-gui), which is GPL-2.0-or-later.
+
+## Releasing
+
+1. Bump `version` in `Cargo.toml`, commit, and push `main`.
+2. Tag it and hash the tarball GitHub serves for the tag:
+
+   ```sh
+   git tag -a v0.2.0 -m "lazyvial 0.2.0" && git push origin v0.2.0
+   curl -sL https://github.com/imjma/lazyvial/archive/refs/tags/v0.2.0.tar.gz | shasum -a 256
+   ```
+
+3. Put the new `url` and `sha256` in `Formula/lazyvial.rb`, commit, and push `main`.
