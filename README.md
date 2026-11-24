@@ -40,7 +40,7 @@ Changes stay in a draft, shown in green, until `:w`. Quitting with unsaved chang
 
 ## License
 
-GPL-2.0-or-later. The keycode table is transcribed from [vial-gui](https://github.com/vial-kb/vial-gui), which is GPL-2.0-or-later.
+MIT. See [LICENSE](LICENSE).
 
 ## Releasing
 
