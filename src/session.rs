@@ -968,7 +968,7 @@ impl Model {
             match load.step(&mut candidates[cursor]) {
                 Ok(_) if load.ready() => {
                     let board = load.finish(candidates.remove(cursor));
-                    let more = board.rest_progress().is_some();
+                    let more = board.reading().is_some();
                     self.kind = ModelKind::Map(Session::mapped(board));
                     return Ok(if more { Step::Working } else { Step::Continue });
                 }

@@ -603,6 +603,17 @@ impl Load {
             }
     }
 
+    /// The part being read, without its count. The background read shows only this, so the
+    /// screen repaints when the part changes and not between reports.
+    fn part(&self) -> &'static str {
+        match self.phase {
+            Phase::TapDance(_) => "tap dances",
+            Phase::Combo(_) => "combos",
+            Phase::MacroSize | Phase::Macro { .. } => "macros",
+            _ => "keyboard",
+        }
+    }
+
     pub(super) fn progress(&self) -> Progress {
         let blocks = (self.size as usize).div_ceil(32);
         let chunks = (self.matrix.len() * 2).div_ceil(usize::from(CHUNK));
@@ -969,9 +980,9 @@ impl Board {
         Ok(self.rest.is_none())
     }
 
-    /// What the background read is on, while it runs.
-    pub(super) fn rest_progress(&self) -> Option<Progress> {
-        self.rest.as_ref().map(Load::progress)
+    /// What the background read is on, while it runs: `tap dances`, `combos`, or `macros`.
+    pub(super) fn reading(&self) -> Option<&'static str> {
+        self.rest.as_ref().map(Load::part)
     }
 
     /// Takes the entries once the load has read them all. They arrive matching the keyboard.
@@ -1986,7 +1997,7 @@ impl Board {
                 active,
                 locked: Some(self.locked),
                 unsaved: self.pending().len(),
-                loading: self.rest_progress().map(|progress| progress.what),
+                loading: self.reading().map(str::to_string),
             },
             mode: paint.mode,
             hold: paint.hold.map(|prompt| self.hold_line(prompt)),

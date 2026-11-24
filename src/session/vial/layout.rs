@@ -240,7 +240,7 @@ pub(super) struct Header {
     /// `Some(true)` locked, `Some(false)` unlocked, `None` before a board is open.
     pub(super) locked: Option<bool>,
     pub(super) unsaved: usize,
-    /// What is still being read after the board opened, as `tap dances 5/32`.
+    /// What is still being read after the board opened, as `tap dances`.
     pub(super) loading: Option<String>,
 }
 
