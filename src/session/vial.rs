@@ -393,7 +393,10 @@ impl MemoryBoard {
     fn candidate(&self) -> Candidate {
         let name = self.store.borrow().name.clone();
         Candidate {
-            name,
+            listing: Box::new(Listing {
+                name,
+                ..Listing::default()
+            }),
             io: Some(Box::new(FakeIo {
                 store: Arc::clone(&self.store),
             })),
@@ -403,9 +406,20 @@ impl MemoryBoard {
 }
 
 pub(super) struct Candidate {
-    pub(super) name: String,
+    /// Boxed so a failed open can hand the candidate back without a large `Err`.
+    pub(super) listing: Box<Listing>,
     io: Option<Box<dyn Io>>,
     guard: Option<Arc<RefCell<Store>>>,
+}
+
+/// What the choose screen shows for a board before it is opened. Empty fields are not shown.
+#[derive(Default)]
+pub(super) struct Listing {
+    pub(super) name: String,
+    pub(super) maker: String,
+    /// `vid:pid` in hex.
+    pub(super) usb: String,
+    pub(super) serial: String,
 }
 
 /// Skip non-Vial HID devices. Do not read the definition here.
@@ -431,7 +445,12 @@ pub(super) fn enumerate() -> Result<Vec<Candidate>> {
             continue;
         }
         found.push(Candidate {
-            name,
+            listing: Box::new(Listing {
+                name,
+                maker: info.manufacturer_string().unwrap_or_default().to_string(),
+                usb: format!("{:04x}:{:04x}", info.vendor_id(), info.product_id()),
+                serial: info.serial_number().unwrap_or_default().to_string(),
+            }),
             io: Some(Box::new(io)),
             guard: None,
         });
@@ -480,7 +499,7 @@ fn open_board(mut candidate: Candidate) -> std::result::Result<Board, (Error, Ca
         macros: loaded.entries.macros.clone(),
     };
     Ok(Board {
-        name: candidate.name.clone(),
+        name: candidate.listing.name.clone(),
         def: loaded.def,
         catalog: loaded.catalog,
         keymap: loaded.keymap,
@@ -2259,7 +2278,7 @@ pub(super) struct Paint<'a> {
 }
 
 pub(super) fn pick_text(
-    names: &[String],
+    boards: &[Candidate],
     cursor: usize,
     failed: Option<usize>,
     popup: Option<&Popup>,
@@ -2269,7 +2288,7 @@ pub(super) fn pick_text(
     rows: u16,
 ) -> String {
     layout::render_pick(
-        names,
+        boards,
         cursor,
         failed,
         layout::Frame {
@@ -2376,9 +2395,9 @@ mod tests {
         .unwrap()
         .named("only");
         let attached = super::super::list_first(vec![board.candidate()]).unwrap();
-        let text = super::super::Model::start(attached).text(40, 8);
+        let text = plain(&super::super::Model::start(attached).text(40, 8));
         assert!(text.contains("choose"), "{text}");
-        assert!(text.contains("> only"), "{text}");
+        assert!(text.contains("▌ only"), "{text}");
         assert!(!text.contains("layer "), "{text}");
     }
 

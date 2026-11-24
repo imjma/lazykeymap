@@ -310,6 +310,8 @@ pub(super) struct SheetCell {
 
 /// Bars across the top and bottom of the screen.
 const BAR: Rgb = Rgb(24, 26, 36);
+/// A board on the choose screen that the cursor is not on.
+const CARD: Rgb = Rgb(30, 33, 44);
 /// The brand chip at the left of the header.
 const BRAND: Rgb = Rgb(187, 154, 247);
 /// Mode badge for typing views: search, fields, the command line.
@@ -329,6 +331,11 @@ fn seg_width(segs: &[Seg]) -> usize {
 
 /// `left`, bar fill, `right`, exactly `cols` wide. `right` drops first, then `left` clips.
 fn bar_line(left: &[Seg], right: &[Seg], cols: usize) -> String {
+    fill_line(left, right, cols, BAR)
+}
+
+/// `bar_line` on any background.
+fn fill_line(left: &[Seg], right: &[Seg], cols: usize, bg: Rgb) -> String {
     let right: &[Seg] = if seg_width(left) + seg_width(right) > cols {
         &[]
     } else {
@@ -337,7 +344,7 @@ fn bar_line(left: &[Seg], right: &[Seg], cols: usize) -> String {
     let fill_w = cols.saturating_sub(seg_width(left) + seg_width(right));
     let line: String = left
         .iter()
-        .chain(std::iter::once(&seg(" ".repeat(fill_w), BAR, TEXT, false)))
+        .chain(std::iter::once(&seg(" ".repeat(fill_w), bg, TEXT, false)))
         .chain(right)
         .map(|(text, bg, fg, bold)| paint(text, *bg, *fg, *bold))
         .collect();
@@ -546,12 +553,12 @@ pub(super) fn render_sheet(sheet: &Sheet, frame: Frame<'_>) -> String {
 }
 
 pub(super) fn render_pick(
-    names: &[String],
+    boards: &[super::Candidate],
     cursor: usize,
     failed: Option<usize>,
     frame: Frame<'_>,
 ) -> String {
-    let count = names.len();
+    let count = boards.len();
     let status = vec![seg(
         format!(
             "{count} Vial keyboard{} found",
@@ -566,7 +573,7 @@ pub(super) fn render_pick(
             title: "keyboards",
             status,
             body: Body::Pick {
-                names,
+                boards,
                 cursor,
                 failed,
             },
@@ -586,7 +593,7 @@ enum Body<'a> {
     Keys(&'a [Cap], Option<&'a Detail>),
     Sheet(&'a Sheet),
     Pick {
-        names: &'a [String],
+        boards: &'a [super::Candidate],
         cursor: usize,
         failed: Option<usize>,
     },
@@ -674,7 +681,7 @@ fn compose(top: Top<'_>, frame: Frame<'_>) -> String {
     };
     let key_lines = match &top.body {
         Body::Keys(caps, _) => paint_rows(caps, cols).len(),
-        Body::Pick { names, .. } => names.len(),
+        Body::Pick { boards, .. } => (boards.len() * 3).saturating_sub(1),
         // A sheet scrolls, so it takes what is left after the bars and borders, at least two lines.
         Body::Sheet(sheet) => {
             let around = 3 + usize::from(!footer.is_empty()) + if lower.is_some() { 6 } else { 0 };
@@ -758,12 +765,14 @@ fn board_body(body: &Body<'_>, spent: &Spend, key_cols: u16, key_lines: usize) -
             out.extend(std::iter::repeat_n(String::new(), spent.board_pad));
         }
         Body::Pick {
-            names,
+            boards,
             cursor,
             failed,
         } => {
-            out.extend(pick_rows(names, *cursor, *failed, usize::from(key_cols)));
-            out.extend(std::iter::repeat_n(String::new(), spent.board_pad));
+            let above = spent.board_pad / 2;
+            out.extend(std::iter::repeat_n(String::new(), above));
+            out.extend(pick_cards(boards, *cursor, *failed, usize::from(key_cols)));
+            out.extend(std::iter::repeat_n(String::new(), spent.board_pad - above));
         }
     }
     out
@@ -891,19 +900,55 @@ fn lower_body(lower: &Lower<'_>, room: usize, width: u16) -> Vec<String> {
     }
 }
 
-fn pick_rows(names: &[String], cursor: usize, failed: Option<usize>, width: usize) -> Vec<String> {
-    names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            let bad = if failed == Some(index) {
-                " unavailable"
-            } else {
-                ""
-            };
-            list_line(&format!("{name}{bad}"), index == cursor, width)
-        })
-        .collect()
+/// Two lines per board, a blank line between: name and maker, then USB id and serial.
+/// The cursor's card is lighter and carries an accent bar.
+fn pick_cards(
+    boards: &[super::Candidate],
+    cursor: usize,
+    failed: Option<usize>,
+    width: usize,
+) -> Vec<String> {
+    // At most 64 columns, centered, so a wide terminal does not stretch the cards.
+    let inner = if width >= 24 {
+        (width - 4).min(64)
+    } else {
+        width
+    };
+    let pad = " ".repeat((width - inner) / 2);
+    let mut out = Vec::new();
+    for (index, board) in boards.iter().enumerate() {
+        let board = &board.listing;
+        let on = index == cursor;
+        let bg = if on { KEY_FACE } else { CARD };
+        let edge = if on {
+            seg("▌ ", bg, SELECTED_BG, true)
+        } else {
+            seg("  ", bg, DIM, false)
+        };
+        let name = seg(&board.name, bg, TEXT, on);
+        let side = if failed == Some(index) {
+            seg("✕ no Vial layout ", bg, UNLOCK, true)
+        } else {
+            seg(format!("{} ", board.maker), bg, DIM, false)
+        };
+        let ids = [board.usb.as_str(), board.serial.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("  ·  ");
+        if index > 0 {
+            out.push(String::new());
+        }
+        out.push(format!(
+            "{pad}{}",
+            fill_line(&[edge.clone(), name], &[side], inner, bg)
+        ));
+        out.push(format!(
+            "{pad}{}",
+            fill_line(&[edge, seg(ids, bg, DIM, false)], &[], inner, bg)
+        ));
+    }
+    out
 }
 
 /// Hits run down a column, then into the next, so Up and Down still walk the list in order.
@@ -1044,20 +1089,6 @@ fn side_line(line: &str, inner: usize, color: Rgb, bold: bool) -> String {
         pad_visible(line, inner),
         dye("│", color, bold)
     )
-}
-
-fn list_line(label: &str, on: bool, width: usize) -> String {
-    let raw = if on {
-        format!(" > {label}")
-    } else {
-        format!("   {label}")
-    };
-    let body = pad_visible(&raw, width);
-    if on {
-        dye_bg(&body, TEXT, KEY_FACE)
-    } else {
-        body
-    }
 }
 
 fn pad_visible(text: &str, width: usize) -> String {

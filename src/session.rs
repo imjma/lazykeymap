@@ -55,7 +55,6 @@ pub(crate) struct Model {
 
 enum ModelKind {
     Pick {
-        names: Vec<String>,
         candidates: Vec<vial::Candidate>,
         cursor: usize,
         failed: Option<usize>,
@@ -396,18 +395,11 @@ impl Model {
     pub(crate) fn start(attached: Attached) -> Self {
         let kind = match attached.kind {
             Kind::Ready(session) => ModelKind::Map(session),
-            Kind::Pick(candidates) => {
-                let names = candidates
-                    .iter()
-                    .map(|candidate| candidate.name.clone())
-                    .collect();
-                ModelKind::Pick {
-                    names,
-                    candidates,
-                    cursor: 0,
-                    failed: None,
-                }
-            }
+            Kind::Pick(candidates) => ModelKind::Pick {
+                candidates,
+                cursor: 0,
+                failed: None,
+            },
         };
         Self { kind, notice: None }
     }
@@ -622,7 +614,9 @@ impl Model {
 
     fn arrow(&mut self, dir: vial::Dir) -> Result<Step> {
         match &mut self.kind {
-            ModelKind::Pick { names, cursor, .. } => move_cursor(cursor, names.len(), dir),
+            ModelKind::Pick {
+                candidates, cursor, ..
+            } => move_cursor(cursor, candidates.len(), dir),
             ModelKind::Map(session) => session.nudge(dir),
             ModelKind::Sheet { session, spot, .. } => {
                 match dir {
@@ -735,7 +729,9 @@ impl Model {
 
     fn page(&mut self, delta: i8) -> Result<Step> {
         match &mut self.kind {
-            ModelKind::Pick { names, cursor, .. } => shift(cursor, names.len(), delta),
+            ModelKind::Pick {
+                candidates, cursor, ..
+            } => shift(cursor, candidates.len(), delta),
             ModelKind::Search {
                 session,
                 browse,
@@ -768,7 +764,9 @@ impl Model {
             keys::End::Last => len.saturating_sub(1),
         };
         match &mut self.kind {
-            ModelKind::Pick { names, cursor, .. } => *cursor = pick(names.len()),
+            ModelKind::Pick {
+                candidates, cursor, ..
+            } => *cursor = pick(candidates.len()),
             ModelKind::Search {
                 session,
                 browse,
@@ -866,13 +864,11 @@ impl Model {
     fn confirm(&mut self) -> Result<Step> {
         match mem::replace(&mut self.kind, vacant()) {
             ModelKind::Pick {
-                names,
                 candidates,
                 cursor,
                 failed,
             } => {
                 self.kind = ModelKind::Pick {
-                    names,
                     candidates,
                     cursor,
                     failed,
@@ -914,7 +910,6 @@ impl Model {
 
     fn confirm_pick(&mut self) -> Result<Step> {
         let ModelKind::Pick {
-            names,
             mut candidates,
             cursor,
             failed,
@@ -924,7 +919,6 @@ impl Model {
         };
         if cursor >= candidates.len() {
             self.kind = ModelKind::Pick {
-                names,
                 candidates,
                 cursor,
                 failed,
@@ -940,7 +934,6 @@ impl Model {
             Err((Error::NoLayout, candidate)) => {
                 candidates.insert(cursor, candidate);
                 self.kind = ModelKind::Pick {
-                    names,
                     candidates,
                     cursor,
                     failed: Some(cursor),
@@ -950,7 +943,6 @@ impl Model {
             Err((err, candidate)) => {
                 candidates.insert(cursor, candidate);
                 self.kind = ModelKind::Pick {
-                    names,
                     candidates,
                     cursor,
                     failed,
@@ -1446,7 +1438,6 @@ fn clamp_col(board: &vial::Board, spot: &mut vial::Spot) {
 
 fn vacant() -> ModelKind {
     ModelKind::Pick {
-        names: Vec::new(),
         candidates: Vec::new(),
         cursor: 0,
         failed: None,
@@ -1515,11 +1506,12 @@ fn render(
     };
     match kind {
         ModelKind::Pick {
-            names,
+            candidates,
             cursor,
             failed,
-            ..
-        } => vial::pick_text(names, *cursor, *failed, popup, mode, &footer, cols, rows),
+        } => vial::pick_text(
+            candidates, *cursor, *failed, popup, mode, &footer, cols, rows,
+        ),
         ModelKind::Map(session) => session.paint(None, None, None, &chrome),
         ModelKind::Sheet { session, spot } => session.paint(Some(*spot), None, None, &chrome),
         ModelKind::Search {

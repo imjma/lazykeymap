@@ -75,14 +75,27 @@ fn pick_when_two() -> lazyvial::Result<()> {
         lazyvial::MemoryBoard::choose(&[alpha, beta])?,
         lazyvial::TestScreen::new(40, 12),
     );
+    // The cursor's card starts with the accent bar.
+    let on = |app: &lazyvial::App<lazyvial::TestScreen>, name: &str| {
+        let mut text = String::new();
+        let mut chars = app.screen().text().chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                chars.by_ref().find(|c| *c == 'm');
+            } else {
+                text.push(ch);
+            }
+        }
+        text.contains(&format!("▌ {name}"))
+    };
     assert!(app.screen().text().contains("choose"));
-    assert!(app.screen().text().contains("> alpha"));
+    assert!(on(&app, "alpha"));
     app.handle(lazyvial::Event::Char('j'))?;
-    assert!(app.screen().text().contains("> beta"));
+    assert!(on(&app, "beta"));
     app.handle(lazyvial::Event::Left)?;
-    assert!(app.screen().text().contains("> alpha"));
+    assert!(on(&app, "alpha"));
     app.handle(lazyvial::Event::Right)?;
-    assert!(app.screen().text().contains("> beta"));
+    assert!(on(&app, "beta"));
     app.handle(lazyvial::Event::Confirm)?;
     assert!(app.screen().text().contains("layer 1/"));
     assert!(app.screen().text().contains("beta"));
