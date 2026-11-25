@@ -1382,14 +1382,22 @@ fn references(doc: &Doc) -> Vec<(Range<usize>, u32)> {
     for node in &doc.nodes {
         walk(node, &mut out, &mut visit);
     }
-    // `#define NAV &mo 2`: the same rule inside a define body written on one line.
+    // `#define NAV &mo 2`: the same rule inside a define body, over continued lines too.
     for define in &doc.defines {
         let Some(body) = &define.body_span else {
             continue;
         };
-        let words = word_spans(&doc.text[body.clone()]);
+        // Comments and `\` line joins become spaces of the same length, so offsets hold.
+        let source = &doc.text[body.clone()];
+        let mut clean = String::with_capacity(source.len());
+        for line in source.split_inclusive('\n') {
+            let code = line.find("//").map_or(line, |i| &line[..i]);
+            clean.push_str(&code.replace('\\', " "));
+            clean.extend(std::iter::repeat_n(' ', line.len() - code.len()));
+        }
+        let words = word_spans(&clean);
         for (at, word) in words.iter().enumerate() {
-            let head = &doc.text[body.start + word.start..body.start + word.end];
+            let head = &clean[word.clone()];
             if !layer_labels.iter().any(|l| head == format!("&{l}")) {
                 continue;
             }
@@ -1912,7 +1920,7 @@ mod tests {
     fn moving_a_layer_renumbers_define_bodies() {
         let source = KEYMAP.replacen(
             "#define HRML",
-            "#define NUMS &tog 6  // numpad\n#define HRML",
+            "#define NUMS &tog 6  // numpad 6\n#define PAD &kp A \\\n    &tog 6 // numpad 6\n#define HRML",
             1,
         );
         let text = layer_edit(
@@ -1920,7 +1928,12 @@ mod tests {
             &LayerOp::Move { from: 5, to: 6 },
         )
         .unwrap();
-        assert!(text.contains("#define NUMS &tog 5  // numpad"), "{text}");
+        assert!(text.contains("#define NUMS &tog 5  // numpad 6"), "{text}");
+        // Continued over a line, and the `6` in the comment is not a layer.
+        assert!(
+            text.contains("#define PAD &kp A \\\n    &tog 5 // numpad 6"),
+            "{text}"
+        );
         // `k1` in HRML is a parameter, not a layer, and the body is untouched.
         assert!(text.contains("#define HRML(k1,k2,k3,k4) &thm LCTRL k1"));
     }

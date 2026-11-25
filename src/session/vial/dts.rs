@@ -20,7 +20,9 @@ pub(super) struct Define {
     pub(super) params: Option<Vec<String>>,
     /// Rest of the line(s): continuations joined with a space, trailing `//` comment stripped, trimmed.
     pub(super) body: String,
-    /// Where `body` is in the file. `None` when it spans continued lines.
+    /// Where `body` is in the file: the trimmed body on one line, or from its start to the end
+    /// of its last line when continued with `\` (comments and `\` included). `None` when a
+    /// continuation comes before the body starts.
     pub(super) body_span: Option<Range<usize>>,
 }
 
@@ -282,11 +284,17 @@ impl Parser<'_> {
             rest = r.get(close + 1..).unwrap_or("");
         }
         let body = rest.find("//").map_or(rest, |i| &rest[..i]).trim();
-        // `line` is the source as written unless continuations were joined.
+        // Where the body starts is the same in the source as in `line` unless a continuation
+        // comes before it. A continued body runs to the end of its last line, `\` and `//`
+        // comments included.
         let raw = self.str(start..end);
-        let body_span = (raw == line).then(|| {
-            let at = start + (body.as_ptr() as usize - line.as_ptr() as usize);
-            at..at + body.len()
+        let at = body.as_ptr() as usize - line.as_ptr() as usize;
+        let body_span = (raw.get(..at) == line.get(..at)).then(|| {
+            if raw == line {
+                start + at..start + at + body.len()
+            } else {
+                start + at..end
+            }
         });
         self.defines.push(Define {
             name: name.to_string(),
