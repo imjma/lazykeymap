@@ -1,8 +1,8 @@
 class Lazyvial < Formula
   desc "Remap a Vial keyboard from the terminal"
   homepage "https://github.com/imjma/lazyvial"
-  url "https://github.com/imjma/lazyvial/archive/refs/tags/v0.1.6.tar.gz"
-  sha256 "62679730911b155a847611c4fe41bb280f851bb1aa3d2d63949b9d5aa119d4f2"
+  url "https://github.com/imjma/lazyvial/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "642179633490822dad3ad05bea818ab1f5ad2b46a016c1cde8cb01fbcde60612"
   license "MIT"
   head "https://github.com/imjma/lazyvial.git", branch: "main"
 
