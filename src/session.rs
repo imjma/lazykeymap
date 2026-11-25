@@ -72,6 +72,18 @@ enum ModelKind {
         cursor: usize,
         load: vial::Load,
     },
+    /// The keyboard stopped answering. The board stays on screen, drafts and all, under a
+    /// pick-one list: reconnect and keep the changes, reconnect and revert them, start again,
+    /// or quit.
+    Lost {
+        session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        /// The disconnect, or why the last try did not work.
+        why: String,
+        cursor: usize,
+        /// Reading the keyboard again; `true` keeps the unsaved changes. Esc stops it.
+        reconnect: Option<Box<(vial::Candidate, vial::Load, bool)>>,
+    },
     Map(Session<Mapping>),
     /// A tap dance, combo, or macro tab.
     Sheet {
@@ -462,12 +474,13 @@ impl Model {
 
     /// `q`, `:q`, or Ctrl-C. Unsaved changes ask first; asking again quits.
     fn quit(&mut self) -> Result<Step> {
+        // The choices already say what quitting drops.
         if matches!(
             self.kind,
             ModelKind::Ask {
                 question: Question::Quit { .. },
                 ..
-            }
+            } | ModelKind::Lost { .. }
         ) {
             return Ok(Step::Quit);
         }
@@ -592,7 +605,7 @@ impl Model {
                     };
                     return Ok(Step::Continue);
                 }
-                Assign::Disconnected(err) => return Err(err),
+                Assign::Disconnected(err, session) => return Ok(self.lose(session, back, &err)),
             }
         }
         if quit {
@@ -631,6 +644,16 @@ impl Model {
                 candidates, cursor, ..
             } => move_cursor(cursor, candidates.len(), dir),
             ModelKind::Open { .. } => {}
+            ModelKind::Lost {
+                session,
+                cursor,
+                reconnect: None,
+                ..
+            } => {
+                let unsaved = session.board.pending().len();
+                move_cursor(cursor, Choice::list(unsaved).len(), dir);
+            }
+            ModelKind::Lost { .. } => {}
             ModelKind::Map(session) => session.nudge(dir),
             ModelKind::Sheet { session, spot, .. } => {
                 match dir {
@@ -746,7 +769,7 @@ impl Model {
             ModelKind::Pick {
                 candidates, cursor, ..
             } => shift(cursor, candidates.len(), delta),
-            ModelKind::Open { .. } => {}
+            ModelKind::Open { .. } | ModelKind::Lost { .. } => {}
             ModelKind::Search {
                 session,
                 browse,
@@ -782,7 +805,7 @@ impl Model {
             ModelKind::Pick {
                 candidates, cursor, ..
             } => *cursor = pick(candidates.len()),
-            ModelKind::Open { .. } => {}
+            ModelKind::Open { .. } | ModelKind::Lost { .. } => {}
             ModelKind::Search {
                 session,
                 browse,
@@ -884,6 +907,10 @@ impl Model {
                 cursor,
                 failed,
             } => return self.open_pick(candidates, cursor, failed),
+            lost @ ModelKind::Lost { .. } => {
+                self.kind = lost;
+                return self.choose_lost();
+            }
             ModelKind::Map(session) => self.kind = searching(session, Target::Key),
             ModelKind::Sheet { session, spot } => self.kind = open_cell(session, spot),
             ModelKind::Search {
@@ -1096,6 +1123,21 @@ impl Model {
 
     fn cancel(&mut self) -> Result<Step> {
         match mem::replace(&mut self.kind, vacant()) {
+            ModelKind::Lost {
+                session,
+                back,
+                cursor,
+                reconnect: Some(_),
+                ..
+            } => {
+                self.kind = ModelKind::Lost {
+                    session,
+                    back,
+                    why: "reconnect stopped".to_string(),
+                    cursor,
+                    reconnect: None,
+                };
+            }
             ModelKind::Open {
                 candidates, cursor, ..
             } => {
@@ -1172,14 +1214,29 @@ impl Model {
         if matches!(self.kind, ModelKind::Open { .. }) {
             return self.pump();
         }
+        if matches!(
+            self.kind,
+            ModelKind::Lost {
+                reconnect: Some(_),
+                ..
+            }
+        ) {
+            return self.pump_reconnect();
+        }
         if let Some(board) = reading_board(&mut self.kind) {
             let until = Instant::now() + SLICE;
-            while !board.read_rest()? {
-                if Instant::now() >= until {
-                    return Ok(Step::Working);
+            loop {
+                match board.read_rest() {
+                    Ok(true) => return Ok(Step::Continue),
+                    Ok(false) if Instant::now() < until => {}
+                    Ok(false) => return Ok(Step::Working),
+                    Err(err) => {
+                        let (session, back) = into_session(mem::replace(&mut self.kind, vacant()))
+                            .expect("a view with a board");
+                        return Ok(self.lose(session, back, &err));
+                    }
                 }
             }
-            return Ok(Step::Continue);
         }
         let kind = mem::replace(&mut self.kind, vacant());
         let (session, back, quit) = match kind {
@@ -1229,9 +1286,189 @@ impl Model {
                     quiet: true,
                 };
             }
-            HoldStep::Disconnected(err) => return Err(err),
+            HoldStep::Disconnected(err, session) => return Ok(self.lose(session, back, &err)),
         }
         Ok(Step::Continue)
+    }
+
+    /// The keyboard stopped answering. Its board stays on screen under the choices.
+    fn lose(&mut self, session: Session<Mapping>, back: Option<vial::Spot>, err: &Error) -> Step {
+        self.kind = ModelKind::Lost {
+            session,
+            back,
+            why: match err {
+                Error::Disconnected => "the keyboard stopped answering".to_string(),
+                other => other.to_string(),
+            },
+            cursor: 0,
+            reconnect: None,
+        };
+        Step::Continue
+    }
+
+    /// Acts on the highlighted choice. Reconnecting finds the same keyboard by name, USB id,
+    /// and serial; a keyboard that is not back yet says so and the choices stay.
+    fn choose_lost(&mut self) -> Result<Step> {
+        let (mut session, back, mut why, cursor) = match mem::replace(&mut self.kind, vacant()) {
+            ModelKind::Lost {
+                session,
+                back,
+                why,
+                cursor,
+                reconnect: None,
+            } => (session, back, why, cursor),
+            other => {
+                self.kind = other;
+                return Ok(Step::Continue);
+            }
+        };
+        let unsaved = session.board.pending().len();
+        let choice = Choice::list(unsaved).get(cursor).copied();
+        // The old handle must close first: a HID device still held does not enumerate again.
+        if matches!(
+            choice,
+            Some(Choice::Keep | Choice::Revert | Choice::Restart)
+        ) {
+            session.board.disown();
+        }
+        match choice {
+            Some(Choice::Quit) => return Ok(Step::Quit),
+            Some(Choice::Restart) => match session.board.find_again() {
+                Ok(candidates) if !candidates.is_empty() => {
+                    self.kind = ModelKind::Pick {
+                        candidates,
+                        cursor: 0,
+                        failed: None,
+                    };
+                    return Ok(Step::Continue);
+                }
+                Ok(_) => why = "no Vial keyboard answers yet: wake it or plug it in".to_string(),
+                Err(err) => why = err.to_string(),
+            },
+            Some(choice @ (Choice::Keep | Choice::Revert)) => {
+                let found = session
+                    .board
+                    .find_again()
+                    .map(|all| all.into_iter().find(|found| session.board.is(found)));
+                match found {
+                    Ok(Some(candidate)) => match vial::Load::begin(&candidate) {
+                        Ok(load) => {
+                            self.kind = ModelKind::Lost {
+                                session,
+                                back,
+                                why,
+                                cursor,
+                                reconnect: Some(Box::new((
+                                    candidate,
+                                    load,
+                                    choice == Choice::Keep,
+                                ))),
+                            };
+                            return self.pump_reconnect();
+                        }
+                        Err(err) => why = why_not(&err),
+                    },
+                    Ok(None) => {
+                        why = "not back yet: wake the keyboard or plug it in, then try again"
+                            .to_string();
+                    }
+                    Err(err) => why = err.to_string(),
+                }
+            }
+            None => {}
+        }
+        self.kind = ModelKind::Lost {
+            session,
+            back,
+            why,
+            cursor,
+            reconnect: None,
+        };
+        Ok(Step::Continue)
+    }
+
+    /// Reads the keyboard again a slice at a time. Keeping the changes waits for the tap dances,
+    /// combos, and macros too, since the changes may be to them. The new board takes the old
+    /// layer and selected key, and with `keep` every unsaved change as a staged one.
+    fn pump_reconnect(&mut self) -> Result<Step> {
+        let (session, back, why, cursor, mut candidate, mut load, keep) =
+            match mem::replace(&mut self.kind, vacant()) {
+                ModelKind::Lost {
+                    session,
+                    back,
+                    why,
+                    cursor,
+                    reconnect: Some(reconnect),
+                } => {
+                    let (candidate, load, keep) = *reconnect;
+                    (session, back, why, cursor, candidate, load, keep)
+                }
+                other => {
+                    self.kind = other;
+                    return Ok(Step::Continue);
+                }
+            };
+        let until = Instant::now() + SLICE;
+        loop {
+            match load.step(&mut candidate) {
+                Ok(done) if done || (!keep && load.ready()) => {
+                    let mut board = load.finish(candidate);
+                    let kept = if keep {
+                        session.board.pending()
+                    } else {
+                        Vec::new()
+                    };
+                    let count = kept.len();
+                    for write in kept {
+                        board.stage(write);
+                    }
+                    let more = board.reading().is_some();
+                    let layer = if session.layer < board.layer_count() {
+                        session.layer
+                    } else {
+                        0
+                    };
+                    let fresh = Session {
+                        selection: session.selection.or(board.first_selectable()),
+                        board,
+                        layer,
+                        phase: Mapping,
+                    };
+                    self.notice = Some(match count {
+                        0 => "reconnected".to_string(),
+                        1 => "reconnected, 1 unsaved change kept".to_string(),
+                        _ => format!("reconnected, {count} unsaved changes kept"),
+                    });
+                    self.kind = if keep {
+                        back_to(fresh, back)
+                    } else {
+                        ModelKind::Map(fresh)
+                    };
+                    return Ok(if more { Step::Working } else { Step::Continue });
+                }
+                Ok(_) if Instant::now() < until => {}
+                Ok(_) => {
+                    self.kind = ModelKind::Lost {
+                        session,
+                        back,
+                        why,
+                        cursor,
+                        reconnect: Some(Box::new((candidate, load, keep))),
+                    };
+                    return Ok(Step::Working);
+                }
+                Err(err) => {
+                    self.kind = ModelKind::Lost {
+                        session,
+                        back,
+                        why: why_not(&err),
+                        cursor,
+                        reconnect: None,
+                    };
+                    return Ok(Step::Continue);
+                }
+            }
+        }
     }
 }
 
@@ -1264,7 +1501,8 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
         ModelKind::Hold { session, back, .. } => Some((session.cancel(), back)),
         ModelKind::Release { session, back, .. }
         | ModelKind::Ask { session, back, .. }
-        | ModelKind::Command { session, back, .. } => Some((session, back)),
+        | ModelKind::Command { session, back, .. }
+        | ModelKind::Lost { session, back, .. } => Some((session, back)),
         ModelKind::Help { under, .. } => into_session(*under),
         ModelKind::Pick { .. } | ModelKind::Open { .. } => None,
     }
@@ -1535,7 +1773,11 @@ fn view_of(kind: &ModelKind) -> keys::View {
     match kind {
         ModelKind::Pick { .. } => keys::View::Pick,
         // Esc is the only key while a board reads.
-        ModelKind::Open { .. } => keys::View::Hold,
+        ModelKind::Open { .. }
+        | ModelKind::Lost {
+            reconnect: Some(_), ..
+        } => keys::View::Hold,
+        ModelKind::Lost { .. } => keys::View::Lost,
         ModelKind::Map(_) => keys::View::Map,
         ModelKind::Sheet { .. } => keys::View::Sheet,
         ModelKind::Search { .. } => keys::View::Search,
@@ -1557,6 +1799,10 @@ fn mode_of(kind: &ModelKind) -> vial::Mode {
     let (label, tone) = match kind {
         ModelKind::Pick { .. } => ("CHOOSE", Browse),
         ModelKind::Open { .. } => ("OPENING", Browse),
+        ModelKind::Lost {
+            reconnect: Some(_), ..
+        } => ("RECONNECTING", Alert),
+        ModelKind::Lost { .. } => ("DISCONNECTED", Alert),
         ModelKind::Map(_) => ("KEYMAP", Browse),
         ModelKind::Sheet { spot, .. } => (
             match spot.tab {
@@ -1628,6 +1874,47 @@ fn render(
             cols,
             rows,
         ),
+        ModelKind::Lost {
+            session,
+            back,
+            why,
+            cursor,
+            reconnect,
+        } => {
+            let unsaved = session.board.pending().len();
+            let mut lines = vec![vial::PopupLine::Text(why.clone()), vial::PopupLine::Blank];
+            let actions = match reconnect {
+                Some(reconnect) => {
+                    let load = &reconnect.1;
+                    let progress = load.progress();
+                    lines.push(vial::PopupLine::Text(format!(
+                        "reading it again… {}%  {}",
+                        progress.percent, progress.what
+                    )));
+                    vec![("esc", "stop")]
+                }
+                None => {
+                    lines.extend(Choice::list(unsaved).iter().enumerate().map(
+                        |(index, choice)| {
+                            vial::PopupLine::Choice(choice.label(unsaved), index == *cursor)
+                        },
+                    ));
+                    vec![("j k", "move"), ("enter", "choose")]
+                }
+            };
+            let popup = vial::Popup {
+                title: "keyboard disconnected".to_string(),
+                lines,
+                scroll: 0,
+                actions,
+                warn: true,
+            };
+            let chrome = Chrome {
+                popup: Some(&popup),
+                ..chrome
+            };
+            session.paint(*back, None, None, &chrome)
+        }
         ModelKind::Map(session) => session.paint(None, None, None, &chrome),
         ModelKind::Sheet { session, spot } => session.paint(Some(*spot), None, None, &chrome),
         ModelKind::Search {
@@ -1775,7 +2062,7 @@ impl Session<Mapping> {
     fn write(mut self, write: vial::Write) -> Assign {
         let hold = match self.board.begin_hold(&write) {
             Ok(hold) => hold,
-            Err(err) => return Assign::Disconnected(err),
+            Err(err) => return Assign::Disconnected(err, self),
         };
         if let Some(hold) = hold {
             return Assign::Holding(self.holding(write, hold.prompt));
@@ -1783,7 +2070,7 @@ impl Session<Mapping> {
         match self.board.commit(&write) {
             Ok(vial::Commit::Stored | vial::Commit::Same) => Assign::Mapped(self),
             Ok(vial::Commit::Holding(hold)) => Assign::Holding(self.holding(write, hold.prompt)),
-            Err(err) => Assign::Disconnected(err),
+            Err(err) => Assign::Disconnected(err, self),
         }
     }
 
@@ -1817,10 +2104,10 @@ impl Session<Mapping> {
 impl Session<Holding> {
     fn poll(mut self) -> HoldStep {
         match self.board.poll_unlock() {
-            Err(err) => HoldStep::Disconnected(err),
+            Err(err) => HoldStep::Disconnected(err, self.cancel()),
             Ok(true) => HoldStep::Waiting(self),
             Ok(false) => match self.board.commit(&self.phase.write) {
-                Err(err) => HoldStep::Disconnected(err),
+                Err(err) => HoldStep::Disconnected(err, self.cancel()),
                 Ok(vial::Commit::Holding(hold)) => {
                     if !hold.prompt.is_empty() {
                         self.phase.prompt = hold.prompt;
@@ -1845,13 +2132,55 @@ impl Session<Holding> {
 enum Assign {
     Mapped(Session<Mapping>),
     Holding(Session<Holding>),
-    Disconnected(Error),
+    /// The keyboard stopped answering. The draft is still on the session.
+    Disconnected(Error, Session<Mapping>),
 }
 
 enum HoldStep {
     Waiting(Session<Holding>),
     Mapped(Session<Mapping>),
-    Disconnected(Error),
+    Disconnected(Error, Session<Mapping>),
+}
+
+/// One answer to a keyboard that stopped answering.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    /// Read the keyboard again and stage the unsaved changes on it.
+    Keep,
+    /// Read the keyboard again and drop the unsaved changes.
+    Revert,
+    /// Back to the keyboard list.
+    Restart,
+    Quit,
+}
+
+impl Choice {
+    /// Revert only means something when there is something to revert.
+    fn list(unsaved: usize) -> &'static [Choice] {
+        if unsaved > 0 {
+            &[Choice::Keep, Choice::Revert, Choice::Restart, Choice::Quit]
+        } else {
+            &[Choice::Keep, Choice::Restart, Choice::Quit]
+        }
+    }
+
+    fn label(self, unsaved: usize) -> String {
+        let changes = format!(
+            "{unsaved} unsaved change{}",
+            if unsaved == 1 { "" } else { "s" }
+        );
+        match self {
+            Choice::Keep if unsaved > 0 => format!("reconnect and keep the {changes}"),
+            Choice::Keep => "reconnect".to_string(),
+            Choice::Revert => format!("reconnect and revert the {changes}"),
+            Choice::Restart if unsaved > 0 => {
+                format!("start again from the keyboard list, dropping the {changes}")
+            }
+            Choice::Restart => "start again from the keyboard list".to_string(),
+            Choice::Quit if unsaved > 0 => format!("quit without the {changes}"),
+            Choice::Quit => "quit".to_string(),
+        }
+    }
 }
 
 pub mod vial;

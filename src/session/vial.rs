@@ -48,6 +48,15 @@ impl Io for HidIo {
     }
 }
 
+/// What a disowned board talks to: nothing.
+struct Closed;
+
+impl Io for Closed {
+    fn exchange(&mut self, _report: &[u8; 32]) -> Result<[u8; 32]> {
+        Err(Error::Disconnected)
+    }
+}
+
 /// Speaks `Ask` through the same encode and decode as HID.
 struct FakeIo {
     store: Arc<RefCell<Store>>,
@@ -55,6 +64,9 @@ struct FakeIo {
 
 impl Io for FakeIo {
     fn exchange(&mut self, report: &[u8; 32]) -> Result<[u8; 32]> {
+        if self.store.borrow().unplugged {
+            return Err(Error::Disconnected);
+        }
         let ask = decode_request(report)?;
         let reply = self.store.borrow_mut().answer(&ask)?;
         Ok(encode_reply(&ask, &reply))
@@ -87,6 +99,8 @@ struct Store {
     cols: u8,
     encoder_count: usize,
     open: bool,
+    /// Every report fails, as a keyboard that went to sleep or was unplugged.
+    unplugged: bool,
 }
 
 impl Store {
@@ -312,6 +326,7 @@ impl MemoryBoard {
             cols,
             encoder_count,
             open: false,
+            unplugged: false,
         };
         store.resize(1);
         Ok(Self {
@@ -382,6 +397,16 @@ impl MemoryBoard {
         self
     }
 
+    /// From now on every report fails, as when the keyboard sleeps or is unplugged.
+    pub fn unplug(&self) {
+        self.store.borrow_mut().unplugged = true;
+    }
+
+    /// Answers again, as a keyboard that woke up or was plugged back in.
+    pub fn plug(&self) {
+        self.store.borrow_mut().unplugged = false;
+    }
+
     pub fn open(&self) -> Result<Attached> {
         super::fan_in(vec![self.candidate()])
     }
@@ -413,7 +438,7 @@ pub(super) struct Candidate {
 }
 
 /// What the choose screen shows for a board before it is opened. Empty fields are not shown.
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(super) struct Listing {
     pub(super) name: String,
     pub(super) maker: String,
@@ -900,7 +925,7 @@ impl Load {
             macros: Vec::new(),
         };
         let mut board = Board {
-            name: candidate.listing.name.clone(),
+            listing: (*candidate.listing).clone(),
             catalog: catalog::merge(
                 &def.custom,
                 self.tap_dance,
@@ -920,6 +945,7 @@ impl Load {
             undo: Vec::new(),
             io: candidate.io.take().expect("a ready load keeps its io"),
             rest: Some(self),
+            fake: guard.clone(),
             _guard: guard,
         };
         board.settle();
@@ -938,7 +964,7 @@ struct Entries {
 }
 
 pub(super) struct Board {
-    name: String,
+    listing: Listing,
     def: Definition,
     catalog: Table,
     keymap: Keymap,
@@ -959,6 +985,8 @@ pub(super) struct Board {
     rest: Option<Load>,
     /// Clears `Store.open` on drop when this board came from a fake.
     _guard: Option<Arc<RefCell<Store>>>,
+    /// The fake device behind this board, so `find_again` can find it after `disown`.
+    fake: Option<Arc<RefCell<Store>>>,
 }
 
 impl Drop for Board {
@@ -970,6 +998,38 @@ impl Drop for Board {
 }
 
 impl Board {
+    /// The keyboards that answer now, for a reconnect or a fresh start. A fake board finds only
+    /// itself, and nothing while unplugged; a real one enumerates HID again.
+    pub(super) fn find_again(&self) -> Result<Vec<Candidate>> {
+        let Some(store) = &self.fake else {
+            return enumerate();
+        };
+        if store.borrow().unplugged {
+            return Ok(Vec::new());
+        }
+        Ok(vec![Candidate {
+            listing: Box::new(self.listing.clone()),
+            io: Some(Box::new(FakeIo {
+                store: Arc::clone(store),
+            })),
+            guard: Some(Arc::clone(store)),
+        }])
+    }
+
+    /// Whether `candidate` is this keyboard: same name, USB id, maker, and serial.
+    pub(super) fn is(&self, candidate: &Candidate) -> bool {
+        *candidate.listing == self.listing
+    }
+
+    /// Closes the device and lets go of it, so it can be found and opened again while this board
+    /// stays on screen. A HID device still held here does not enumerate again.
+    pub(super) fn disown(&mut self) {
+        self.io = Box::new(Closed);
+        if let Some(store) = self._guard.take() {
+            store.borrow_mut().open = false;
+        }
+    }
+
     /// One more report of the entries still unread. `true` once there is nothing left to read.
     pub(super) fn read_rest(&mut self) -> Result<bool> {
         let Some(load) = &mut self.rest else {
@@ -1992,7 +2052,7 @@ impl Board {
         };
         layout::Frame {
             header: layout::Header {
-                name: self.name.clone(),
+                name: self.listing.name.clone(),
                 tabs,
                 active,
                 locked: Some(self.locked),

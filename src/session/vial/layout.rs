@@ -289,6 +289,8 @@ pub(in crate::session) enum PopupLine {
     Text(String),
     /// A change: what it was, and what it becomes.
     Change(String, String),
+    /// One option of a pick-one list; `true` is the highlighted one.
+    Choice(String, bool),
     Blank,
 }
 
@@ -1482,6 +1484,7 @@ fn popup_box(popup: &Popup, cols: usize, rows: usize) -> Vec<Vec<Cell>> {
             PopupLine::Heading(text) => text.chars().count(),
             PopupLine::Pair(_, label) => key_w + 3 + label.chars().count(),
             PopupLine::Change(was, now) => was.chars().count() + 5 + now.chars().count(),
+            PopupLine::Choice(text, _) => 2 + text.chars().count(),
             PopupLine::Text(_) | PopupLine::Blank => 0,
         })
         .chain([chips_w, popup.title.chars().count() + 4, 28])
@@ -1608,6 +1611,12 @@ fn popup_line(line: &PopupLine, key_w: usize, width: usize, accent: Rgb) -> Vec<
             ("  →  ".to_string(), accent, true),
             (now.clone(), CHANGED, true),
         ],
+        PopupLine::Choice(text, true) => {
+            vec![("▸ ".to_string(), accent, true), (text.clone(), TEXT, true)]
+        }
+        PopupLine::Choice(text, false) => {
+            vec![("  ".to_string(), DIM, false), (text.clone(), DIM, false)]
+        }
     };
     let mut row = Vec::new();
     for (text, fg, bold) in segments {

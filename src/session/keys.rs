@@ -16,6 +16,8 @@ pub(super) enum View {
     Command,
     Hold,
     Help,
+    /// The keyboard stopped answering: reconnect, revert, start again, or quit.
+    Lost,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -748,6 +750,54 @@ const ROWS: &[Row] = &[
         show: true,
     },
     Row {
+        view: View::Lost,
+        key: Key::Char('j'),
+        act: Act::Nudge(Dir::Down),
+        name: "j",
+        label: "down",
+        show: true,
+    },
+    Row {
+        view: View::Lost,
+        key: Key::Char('k'),
+        act: Act::Nudge(Dir::Up),
+        name: "k",
+        label: "up",
+        show: true,
+    },
+    Row {
+        view: View::Lost,
+        key: Key::Down,
+        act: Act::Nudge(Dir::Down),
+        name: "down",
+        label: "down",
+        show: false,
+    },
+    Row {
+        view: View::Lost,
+        key: Key::Up,
+        act: Act::Nudge(Dir::Up),
+        name: "up",
+        label: "up",
+        show: false,
+    },
+    Row {
+        view: View::Lost,
+        key: Key::Confirm,
+        act: Act::Confirm,
+        name: "enter",
+        label: "choose",
+        show: true,
+    },
+    Row {
+        view: View::Lost,
+        key: Key::Char('q'),
+        act: Act::Quit,
+        name: "q",
+        label: "quit",
+        show: true,
+    },
+    Row {
         view: View::Search,
         key: Key::Up,
         act: Act::Nudge(Dir::Up),
@@ -1044,6 +1094,7 @@ pub(super) fn cheatsheet(current: View) -> Vec<PopupLine> {
         View::Edit,
         View::Ask,
         View::Command,
+        View::Lost,
     ];
     let mut lines = vec![PopupLine::Text(
         views
@@ -1077,6 +1128,7 @@ fn title(view: View) -> &'static str {
         View::Edit => "field",
         View::Ask => "confirm",
         View::Command => "command line",
+        View::Lost => "disconnected",
     }
 }
 

@@ -373,3 +373,88 @@ fn key_details_fill_the_spare_rows() -> lazyvial::Result<()> {
     );
     Ok(())
 }
+
+/// A tap dance staged with `tap Esc`, then the keyboard stops answering on `:w`.
+fn lost_with_one_change(board: &MemoryBoard) -> lazyvial::Result<App<TestScreen>> {
+    let mut app = App::new(board.open()?, TestScreen::new(100, 24));
+    app.handle(Event::Tab)?;
+    app.handle(Event::Confirm)?;
+    press(&mut app, "esc")?;
+    app.handle(Event::Confirm)?;
+    app.handle(Event::Confirm)?;
+    board.unplug();
+    write(&mut app)?;
+    Ok(app)
+}
+
+#[test]
+fn reconnect_keeps_unsaved_changes() -> lazyvial::Result<()> {
+    let board = board()?;
+    let mut app = lost_with_one_change(&board)?;
+    let text = plain(&app);
+    assert!(text.contains("keyboard disconnected"), "{text}");
+    assert!(
+        text.contains("▸ reconnect and keep the 1 unsaved change"),
+        "{text}"
+    );
+    // Still asleep: the choices stay and say why.
+    app.handle(Event::Confirm)?;
+    assert!(plain(&app).contains("not back yet"), "{}", plain(&app));
+    board.plug();
+    app.handle(Event::Confirm)?;
+    let text = plain(&app);
+    assert!(
+        text.contains("reconnected, 1 unsaved change kept"),
+        "{text}"
+    );
+    assert!(
+        text.contains("tap dance 1/2") && text.contains("1 unsaved"),
+        "{text}"
+    );
+    write(&mut app)?;
+    assert!(plain(&app).contains("wrote 1 change"), "{}", plain(&app));
+    drop(app);
+    // The keyboard has it: a fresh open shows the tap dance with no unsaved change.
+    let mut again = App::new(board.open()?, TestScreen::new(100, 24));
+    again.handle(Event::Tab)?;
+    let text = plain(&again);
+    assert!(line_with(&text, "TD(0)").contains("Esc"), "{text}");
+    assert!(!text.contains("unsaved"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn reconnect_can_revert_or_start_again() -> lazyvial::Result<()> {
+    let board = board()?;
+    let mut app = lost_with_one_change(&board)?;
+    board.plug();
+    app.handle(Event::Down)?;
+    assert!(
+        plain(&app).contains("▸ reconnect and revert the 1 unsaved change"),
+        "{}",
+        plain(&app)
+    );
+    app.handle(Event::Confirm)?;
+    let text = plain(&app);
+    assert!(
+        text.contains("reconnected") && !text.contains("unsaved"),
+        "{text}"
+    );
+    drop(app);
+
+    let mut app = lost_with_one_change(&board)?;
+    board.plug();
+    app.handle(Event::Down)?;
+    app.handle(Event::Down)?;
+    app.handle(Event::Confirm)?;
+    let text = plain(&app);
+    assert!(
+        text.contains("choose a keyboard") && text.contains("▌ board"),
+        "{text}"
+    );
+    drop(app);
+    // q on the choices quits without asking again.
+    let mut app = lost_with_one_change(&board)?;
+    assert_eq!(app.handle(Event::Char('q'))?, Step::Quit);
+    Ok(())
+}
