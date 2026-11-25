@@ -1,6 +1,6 @@
-use lazyvial::{App, Event, MemoryBoard, Step, TestScreen};
+use lazykeymap::{App, Event, MemoryBoard, Step, TestScreen};
 
-fn press(app: &mut App<TestScreen>, keys: &str) -> lazyvial::Result<()> {
+fn press(app: &mut App<TestScreen>, keys: &str) -> lazykeymap::Result<()> {
     for ch in keys.chars() {
         app.handle(Event::Char(ch))?;
     }
@@ -29,13 +29,13 @@ fn plain(app: &App<TestScreen>) -> String {
 }
 
 /// `:w` and Enter.
-fn write(app: &mut App<TestScreen>) -> lazyvial::Result<()> {
+fn write(app: &mut App<TestScreen>) -> lazykeymap::Result<()> {
     press(app, ":w")?;
     app.handle(Event::Confirm)?;
     Ok(())
 }
 
-fn board() -> lazyvial::Result<MemoryBoard> {
+fn board() -> lazykeymap::Result<MemoryBoard> {
     Ok(
         MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
             .tap_dances(2)
@@ -45,7 +45,7 @@ fn board() -> lazyvial::Result<MemoryBoard> {
 }
 
 #[test]
-fn key_list_previews_on_sheet_cells_in_amber() -> lazyvial::Result<()> {
+fn key_list_previews_on_sheet_cells_in_amber() -> lazykeymap::Result<()> {
     let amber = "48;2;224;175;104";
     let board = board()?;
     let mut app = App::new(board.open()?, TestScreen::new(100, 30));
@@ -77,7 +77,7 @@ fn key_list_previews_on_sheet_cells_in_amber() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn tap_dance_keys_and_term_reach_the_board() -> lazyvial::Result<()> {
+fn tap_dance_keys_and_term_reach_the_board() -> lazykeymap::Result<()> {
     let board = board()?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     app.handle(Event::Tab)?;
@@ -121,7 +121,7 @@ fn tap_dance_keys_and_term_reach_the_board() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn locked_board_takes_a_combo_without_unlocking() -> lazyvial::Result<()> {
+fn locked_board_takes_a_combo_without_unlocking() -> lazykeymap::Result<()> {
     let board = board()?.locked(&[(0, 0)]);
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     app.handle(Event::Tab)?;
@@ -146,7 +146,7 @@ fn locked_board_takes_a_combo_without_unlocking() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn locked_board_writes_macros_after_the_unlock() -> lazyvial::Result<()> {
+fn locked_board_writes_macros_after_the_unlock() -> lazykeymap::Result<()> {
     let board = board()?.locked(&[(0, 0)]);
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     app.handle(Event::BackTab)?;
@@ -170,7 +170,7 @@ fn locked_board_writes_macros_after_the_unlock() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn macro_steps_reach_the_board() -> lazyvial::Result<()> {
+fn macro_steps_reach_the_board() -> lazykeymap::Result<()> {
     let board = board()?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     app.handle(Event::BackTab)?;
@@ -202,7 +202,7 @@ fn macro_steps_reach_the_board() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn macros_that_overflow_the_buffer_are_refused() -> lazyvial::Result<()> {
+fn macros_that_overflow_the_buffer_are_refused() -> lazykeymap::Result<()> {
     let board = board()?.macro_buffer(8);
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     app.handle(Event::BackTab)?;
@@ -224,7 +224,7 @@ fn macros_that_overflow_the_buffer_are_refused() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn picks_stage_at_once_and_wait_for_write() -> lazyvial::Result<()> {
+fn picks_stage_at_once_and_wait_for_write() -> lazykeymap::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     // One Enter stages the pick; the board previewed it already.
@@ -253,7 +253,7 @@ fn picks_stage_at_once_and_wait_for_write() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn undo_and_discard_drop_staged_changes() -> lazyvial::Result<()> {
+fn undo_and_discard_drop_staged_changes() -> lazykeymap::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     for query in ["/esc", "/tab"] {
@@ -293,7 +293,7 @@ fn undo_and_discard_drop_staged_changes() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn command_line_picks_exact_names_then_prefixes() -> lazyvial::Result<()> {
+fn command_line_picks_exact_names_then_prefixes() -> lazykeymap::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 24));
     press(&mut app, "/esc")?;
@@ -327,7 +327,7 @@ fn command_line_picks_exact_names_then_prefixes() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn quit_with_unsaved_changes_asks() -> lazyvial::Result<()> {
+fn quit_with_unsaved_changes_asks() -> lazykeymap::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     press(&mut app, "/esc")?;
@@ -360,7 +360,7 @@ fn quit_with_unsaved_changes_asks() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn tab_walks_layers_then_editors_and_search_groups() -> lazyvial::Result<()> {
+fn tab_walks_layers_then_editors_and_search_groups() -> lazykeymap::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
         .layers(3)
         .tap_dances(1);
@@ -390,7 +390,7 @@ fn tab_walks_layers_then_editors_and_search_groups() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn key_details_fill_the_spare_rows() -> lazyvial::Result<()> {
+fn key_details_fill_the_spare_rows() -> lazykeymap::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?.layers(3);
     let mut app = App::new(board.open()?, TestScreen::new(110, 32));
     let text = plain(&app);
@@ -424,7 +424,7 @@ fn key_details_fill_the_spare_rows() -> lazyvial::Result<()> {
 }
 
 /// A tap dance staged with `tap Esc`, then the keyboard stops answering on `:w`.
-fn lost_with_one_change(board: &MemoryBoard) -> lazyvial::Result<App<TestScreen>> {
+fn lost_with_one_change(board: &MemoryBoard) -> lazykeymap::Result<App<TestScreen>> {
     let mut app = App::new(board.open()?, TestScreen::new(100, 24));
     app.handle(Event::Tab)?;
     app.handle(Event::Confirm)?;
@@ -436,7 +436,7 @@ fn lost_with_one_change(board: &MemoryBoard) -> lazyvial::Result<App<TestScreen>
 }
 
 #[test]
-fn reconnect_keeps_unsaved_changes() -> lazyvial::Result<()> {
+fn reconnect_keeps_unsaved_changes() -> lazykeymap::Result<()> {
     let board = board()?;
     let mut app = lost_with_one_change(&board)?;
     let text = plain(&app);
@@ -472,7 +472,7 @@ fn reconnect_keeps_unsaved_changes() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn reconnect_can_revert_or_start_again() -> lazyvial::Result<()> {
+fn reconnect_can_revert_or_start_again() -> lazykeymap::Result<()> {
     let board = board()?;
     let mut app = lost_with_one_change(&board)?;
     board.plug();

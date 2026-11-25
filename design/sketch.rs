@@ -1,4 +1,4 @@
-//! Candidate sketch for lazyvial. Not the crate, and not an implementation.
+//! Candidate sketch for lazykeymap. Not the crate, and not an implementation.
 //!
 //! Public API, re-exported at the bottom:
 //! `attach`, `Attached`, `MemoryBoard`, `App`, `Event`, `Step`, `Screen`,

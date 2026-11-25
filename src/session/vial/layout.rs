@@ -380,11 +380,11 @@ fn fill_line(left: &[Seg], right: &[Seg], cols: usize, bg: Rgb) -> String {
     take_visible(&line, cols)
 }
 
-/// ` lazyvial  board  L0 L1 Tap Dance  ...  ● 2 unsaved  ● ready `.
+/// ` lazykeymap  board  L0 L1 Tap Dance  ...  ● 2 unsaved  ● ready `.
 /// Tabs farthest from the active one drop first when the line is too narrow.
 fn header_line(header: &Header, cols: usize) -> String {
     let mut left = vec![
-        seg(" lazyvial ", BRAND, SELECTED_FG, true),
+        seg(" lazykeymap ", BRAND, SELECTED_FG, true),
         seg(format!(" {} ", header.name), BAR, TEXT, true),
     ];
     let mut right = Vec::new();
@@ -491,11 +491,15 @@ pub(super) struct Detail {
 pub(super) fn render_board(
     layer: u8,
     layer_count: u8,
+    name: Option<&str>,
     caps: &[Cap],
     detail: Option<&Detail>,
     frame: Frame<'_>,
 ) -> String {
-    let title = format!("layer {layer}/{layer_count}");
+    let title = match name {
+        Some(name) => format!("layer {layer}/{layer_count}  {name}"),
+        None => format!("layer {layer}/{layer_count}"),
+    };
     let selected = caps
         .iter()
         .find(|cap| cap.selected && !cap.legend.is_empty())
@@ -618,7 +622,7 @@ pub(super) fn render_pick<'a>(
         ],
         _ => vec![seg(
             format!(
-                "{count} Vial keyboard{} found",
+                "{count} keyboard{} found",
                 if count == 1 { "" } else { "s" }
             ),
             BAR,
@@ -826,7 +830,7 @@ fn board_body(body: &Body<'_>, spent: &Spend, key_cols: u16, key_lines: usize) -
         }
         Body::Reading(part) => {
             let lines = [
-                dye("lazyvial is still reading this keyboard", TEXT, true),
+                dye("lazykeymap is still reading this keyboard", TEXT, true),
                 dye(&format!("◌ now {part}"), SELECTED_BG, true),
                 dye(
                     "this tab fills in once it is read · the keymap works meanwhile",
@@ -1030,12 +1034,14 @@ fn pick_cards(
             super::CardNote::Opening(progress) if on => Some(progress),
             _ => None,
         };
-        let side = match note {
-            super::CardNote::Failed(at, why) if *at == index => {
-                seg(format!("✕ {why} "), bg, UNLOCK, true)
-            }
-            _ if opening.is_some() => seg("opening… ", bg, SELECTED_BG, true),
-            _ => seg(format!("{} ", board.maker), bg, DIM, false),
+        let failed = match note {
+            super::CardNote::Failed(at, why) if *at == index => Some(why),
+            _ => None,
+        };
+        let side = if opening.is_some() {
+            seg("opening… ", bg, SELECTED_BG, true)
+        } else {
+            seg(format!("{} ", board.maker), bg, DIM, false)
         };
         let ids = [board.usb.as_str(), board.serial.as_str()]
             .into_iter()
@@ -1049,8 +1055,10 @@ fn pick_cards(
             "{pad}{}",
             fill_line(&[edge.clone(), name], &[side], inner, bg)
         ));
-        let detail = match opening {
-            Some(progress) => {
+        // The reason gets the whole second line: beside the name, a long one did not fit and
+        // was dropped, so a failed open looked like nothing happened.
+        let detail = match (opening, failed) {
+            (Some(progress), _) => {
                 let cells = 16;
                 let filled = progress.percent.min(100) * cells / 100;
                 vec![
@@ -1065,7 +1073,8 @@ fn pick_cards(
                     ),
                 ]
             }
-            None => vec![edge, seg(ids, bg, DIM, false)],
+            (None, Some(why)) => vec![edge, seg(format!("✕ {why}"), bg, UNLOCK, true)],
+            (None, None) => vec![edge, seg(ids, bg, DIM, false)],
         };
         out.push(format!("{pad}{}", fill_line(&detail, &[], inner, bg)));
     }
@@ -2195,7 +2204,7 @@ mod tests {
             cols: 40,
             rows: 8,
         };
-        let text = render_board(1, 1, &caps, None, frame);
+        let text = render_board(1, 1, None, &caps, None, frame);
         assert!(text.contains("selected Space"), "{text}");
         assert!(text.contains('▌'), "{text}");
         assert!(text.contains("48;2;122;162;247"), "{text}");

@@ -126,6 +126,57 @@ pub(super) fn merge(
     Table { entries, shelves }
 }
 
+/// Adds a custom keycode to the User shelf, made at the end when there is none. A code the
+/// table already has is left as it is.
+pub(super) fn add_custom(table: &mut Table, code: u16, name: &str) {
+    if table.entries.iter().any(|entry| entry.code == code) {
+        return;
+    }
+    let Some(at) = table.shelves.iter().position(|shelf| shelf.name == "User") else {
+        let start = table.entries.len();
+        table.entries.push(entry(name, name, code));
+        table.shelves.push(Shelf {
+            name: "User",
+            start,
+            end: start + 1,
+        });
+        return;
+    };
+    let end = table.shelves[at].end;
+    table.entries.insert(end, entry(name, name, code));
+    table.shelves[at].end += 1;
+    for shelf in &mut table.shelves[at + 1..] {
+        shelf.start += 1;
+        shelf.end += 1;
+    }
+}
+
+/// Drops the entries `keep` refuses, and a shelf left empty. A `(kc)` entry is asked with `A`
+/// inside it.
+pub(super) fn retain(table: Table, keep: impl Fn(u16) -> bool) -> Table {
+    let mut entries = Vec::new();
+    let mut shelves = Vec::new();
+    let mut all = table.entries.into_iter();
+    for shelf in table.shelves {
+        let start = entries.len();
+        entries.extend(all.by_ref().take(shelf.end - shelf.start).filter(|entry| {
+            keep(if entry.masked {
+                entry.code | 0x04
+            } else {
+                entry.code
+            })
+        }));
+        if entries.len() > start {
+            shelves.push(Shelf {
+                name: shelf.name,
+                start,
+                end: entries.len(),
+            });
+        }
+    }
+    Table { entries, shelves }
+}
+
 /// The Layers shelf for a board with `count` layers: each kind for every layer, `LT` for the first 16.
 fn layer_keys(count: u8, features: Features) -> Vec<Entry> {
     // QMK packs the layer into the low 5 bits.

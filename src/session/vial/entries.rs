@@ -7,6 +7,8 @@ pub(in crate::session) enum Tab {
     TapDance,
     Combos,
     Macros,
+    /// A section of a ZMK keymap file.
+    Section(super::sections::Kind),
 }
 
 impl Tab {
@@ -15,6 +17,7 @@ impl Tab {
             Tab::TapDance => "Tap Dance",
             Tab::Combos => "Combos",
             Tab::Macros => "Macros",
+            Tab::Section(kind) => kind.name(),
         }
     }
 }

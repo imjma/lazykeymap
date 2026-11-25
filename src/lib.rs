@@ -26,8 +26,9 @@ impl std::fmt::Display for Error {
         match self {
             Error::NoBoard => write!(
                 f,
-                "no Vial keyboard found. Connect it by USB or Bluetooth (wake it with a key press) \
-                 and check it runs Vial firmware. On Linux, the hidraw device also needs a udev rule."
+                "no Vial or ZMK Studio keyboard found. Connect it by USB or Bluetooth (wake it with a \
+                 key press) and check it runs Vial firmware, or ZMK with Studio enabled; a ZMK board \
+                 with its own USB id needs --port. On Linux, the hidraw device also needs a udev rule."
             ),
             Error::NoLayout => write!(f, "this keyboard has no Vial layout"),
             Error::Unsupported { vial } => {
@@ -44,4 +45,4 @@ impl std::error::Error for Error {}
 
 pub use app::{App, Screen, TestScreen};
 pub use session::vial::MemoryBoard;
-pub use session::{attach, Attached, Event, Step};
+pub use session::{attach, attach_file, attach_port, Attached, Event, Step};

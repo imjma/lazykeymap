@@ -73,6 +73,8 @@ enum ModelKind {
         candidates: Vec<vial::Candidate>,
         cursor: usize,
         load: vial::Load,
+        /// The layer to show once open: 0 from the list, the edited one after a layer change.
+        land: u8,
     },
     /// The keyboard stopped answering. The board stays on screen, drafts and all, under a
     /// pick-one list: reconnect and keep the changes, reconnect and revert them, start again,
@@ -156,6 +158,8 @@ enum Question {
         count: usize,
         lines: Vec<vial::PopupLine>,
     },
+    /// `:layer-remove`, which changes the keyboard or file at once.
+    RemoveLayer { layer: u8, name: String },
 }
 
 impl Question {
@@ -184,6 +188,16 @@ impl Question {
                 Some("These go back to what the keyboard holds.".to_string()),
                 lines,
                 vec![("enter", "discard"), ("esc", "keep")],
+                true,
+            ),
+            Question::RemoveLayer { layer, name } => (
+                format!("remove layer {layer} {name}?"),
+                Some(
+                    "It goes from the keyboard or the file at once; undo does not bring it back."
+                        .to_string(),
+                ),
+                &[],
+                vec![("enter", "remove"), ("esc", "keep")],
                 true,
             ),
         };
@@ -253,8 +267,18 @@ impl Press {
 #[derive(Clone, Copy)]
 enum Field {
     Term,
-    Delay { insert: bool },
-    Text { insert: bool },
+    Delay {
+        insert: bool,
+    },
+    Text {
+        insert: bool,
+    },
+    /// A keymap-file node's name or label.
+    Name,
+    /// A keymap-file property, by its column.
+    Prop {
+        col: usize,
+    },
 }
 
 impl Field {
@@ -263,13 +287,19 @@ impl Field {
             Field::Term => "tapping term (ms)",
             Field::Delay { .. } => "delay (ms)",
             Field::Text { .. } => "text",
+            Field::Name => "name",
+            Field::Prop { .. } => "value",
         }
     }
 
-    /// Digits for numbers, printable ASCII for text. The firmware types text byte by byte.
+    /// Digits for numbers, printable ASCII for text. The firmware types text byte by byte. A
+    /// devicetree name takes letters, digits, `_`, and `-`; a value anything but what would end
+    /// it early.
     fn accepts(self, text: &str, ch: char) -> bool {
         let max = match self {
             Field::Text { .. } => return (' '..='~').contains(&ch),
+            Field::Name => return ch.is_ascii_alphanumeric() || ch == '_' || ch == '-',
+            Field::Prop { .. } => return (' '..='~').contains(&ch) && !";<>\"{}&".contains(ch),
             Field::Term => 10_000,
             Field::Delay { .. } => u32::from(vial::MAX_DELAY),
         };
@@ -392,10 +422,28 @@ fn fan_in(mut candidates: Vec<vial::Candidate>) -> Result<Attached> {
     }
 }
 
-/// HID enumerate, then the choose screen. Usage page `0xFF60`, usage `0x61`.
-/// One board still waits for Enter. Zero boards is `NoBoard`.
+/// Vial boards over HID and ZMK Studio boards over USB serial and Bluetooth, then the choose
+/// screen. One board still waits for Enter. Zero boards is `NoBoard`.
 pub fn attach() -> Result<Attached> {
     list_first(vial::enumerate()?)
+}
+
+/// `attach`, and the serial port at `path` is asked for ZMK Studio whatever its USB id.
+/// It is asked again on every reconnect.
+pub fn attach_port(path: &str) -> Result<Attached> {
+    vial::add_port(path);
+    attach()
+}
+
+/// A ZMK `.keymap` file, read and ready to edit; or a zmk-config folder: its one keymap, or
+/// the choose screen when it has several. `:w` writes the file.
+pub fn attach_file(path: &std::path::Path) -> Result<Attached> {
+    let candidates = vial::file_candidates(path)?;
+    if candidates.len() == 1 {
+        fan_in(candidates)
+    } else {
+        list_first(candidates)
+    }
 }
 
 fn list_first(candidates: Vec<vial::Candidate>) -> Result<Attached> {
@@ -538,10 +586,11 @@ impl Model {
         session: Session<Mapping>,
         back: Option<vial::Spot>,
         goal: Goal,
+        arg: &str,
     ) -> Result<Step> {
         let mut session = session;
         self.kind = match goal {
-            Goal::Run(command) => return self.run_command(session, back, command),
+            Goal::Run(command) => return self.run_command(session, back, command, arg),
             Goal::Layer(layer) => {
                 session.layer = layer;
                 ModelKind::Map(session)
@@ -556,11 +605,13 @@ impl Model {
         Ok(Step::Continue)
     }
 
+    /// `arg` is what was typed after the command's name, as the name in `:layer-rename Sym`.
     fn run_command(
         &mut self,
         session: Session<Mapping>,
         back: Option<vial::Spot>,
         command: Cmd,
+        arg: &str,
     ) -> Result<Step> {
         let mut session = session;
         match command {
@@ -593,9 +644,202 @@ impl Model {
                 self.kind = back_to(session, back);
                 return self.open_help();
             }
+            Cmd::RowAdd | Cmd::RowRemove => {
+                let Some(
+                    spot @ vial::Spot {
+                        tab: vial::Tab::Section(kind),
+                        ..
+                    },
+                ) = back
+                else {
+                    self.notice = Some("open a keymap file's tab first".to_string());
+                    self.kind = back_to(session, back);
+                    return Ok(Step::Continue);
+                };
+                if kind.rows_fixed() {
+                    self.notice = Some("encoder rows are the layers: use :layer-add".to_string());
+                    self.kind = back_to(session, back);
+                    return Ok(Step::Continue);
+                }
+                let mut rows = session.board.section(kind).to_vec();
+                let row = if command == Cmd::RowAdd {
+                    let name = if arg.is_empty() {
+                        let base = kind.name().to_lowercase();
+                        (rows.len()..)
+                            .map(|n| format!("{base}_{n}"))
+                            .find(|name| rows.iter().all(|row| row.name != *name))
+                            .unwrap_or(base)
+                    } else {
+                        arg.to_string()
+                    };
+                    if !name
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    {
+                        self.notice = Some("a name takes letters, digits, and _".to_string());
+                        self.kind = back_to(session, back);
+                        return Ok(Step::Continue);
+                    }
+                    rows.push(kind.blank(&name));
+                    rows.len() - 1
+                } else {
+                    if spot.row < rows.len() {
+                        rows.remove(spot.row);
+                    }
+                    spot.row.saturating_sub(1)
+                };
+                let at = vial::Spot {
+                    row,
+                    col: 0,
+                    ..spot
+                };
+                self.land(session, vial::Write::Section(kind, rows), Some(at));
+                return Ok(Step::Continue);
+            }
+            Cmd::LayerAdd
+            | Cmd::LayerRemove
+            | Cmd::LayerRename
+            | Cmd::LayerLeft
+            | Cmd::LayerRight => {
+                let layer = session.layer;
+                let last = session.board.layer_count().saturating_sub(1);
+                // Removing goes to the keyboard or the file at once, with no undo: ask first.
+                if command == Cmd::LayerRemove {
+                    let name = session.board.layer_name(layer).unwrap_or("").to_string();
+                    self.kind = ModelKind::Ask {
+                        session,
+                        back,
+                        question: Question::RemoveLayer { layer, name },
+                    };
+                    return Ok(Step::Continue);
+                }
+                let change = match command {
+                    Cmd::LayerAdd => Ok((vial::LayerOp::Add, last + 1)),
+                    Cmd::LayerRemove => Ok((vial::LayerOp::Remove(layer), layer.saturating_sub(1))),
+                    Cmd::LayerRename if arg.is_empty() => {
+                        Err("type the name after it: :layer-rename Sym")
+                    }
+                    Cmd::LayerRename => Ok((vial::LayerOp::Rename(layer, arg.to_string()), layer)),
+                    Cmd::LayerLeft if layer == 0 => Err("this is the first layer"),
+                    Cmd::LayerLeft => Ok((
+                        vial::LayerOp::Move {
+                            from: layer,
+                            to: layer - 1,
+                        },
+                        layer - 1,
+                    )),
+                    Cmd::LayerRight if layer >= last => Err("this is the last layer"),
+                    _ => Ok((
+                        vial::LayerOp::Move {
+                            from: layer,
+                            to: layer + 1,
+                        },
+                        layer + 1,
+                    )),
+                };
+                match change {
+                    Ok((op, land)) => return self.change_layers(session, back, op, land),
+                    Err(why) => self.notice = Some(why.to_string()),
+                }
+            }
+            Cmd::Layout => return self.switch_layout(session, back, arg),
         }
         self.kind = back_to(session, back);
         Ok(Step::Continue)
+    }
+
+    /// Sends a layer change, then reads the keyboard again and lands on `land`.
+    fn change_layers(
+        &mut self,
+        session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        op: vial::LayerOp,
+        land: u8,
+    ) -> Result<Step> {
+        let mut session = session;
+        if let Err(err) = session.board.edit_layers(&op) {
+            if matches!(err, Error::Disconnected) {
+                return Ok(self.lose(session, back, &err));
+            }
+            self.notice = Some(err.to_string());
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        self.reread(session, back, land)
+    }
+
+    /// `:layout` lists physical layouts; `:layout 1` or `:layout five` switches and re-reads.
+    fn switch_layout(
+        &mut self,
+        mut session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        arg: &str,
+    ) -> Result<Step> {
+        let names = session.board.layouts();
+        if names.is_empty() {
+            self.notice = Some("this keyboard has one layout".to_string());
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        let at = session.board.layout_at();
+        if arg.is_empty() {
+            self.notice = Some(layout_list(&names, at));
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        let index = match layout_pick(&names, arg) {
+            Ok(index) => index,
+            Err(why) => {
+                self.notice = Some(why);
+                self.kind = back_to(session, back);
+                return Ok(Step::Continue);
+            }
+        };
+        if index == at {
+            self.notice = Some(format!("already {at} {}", names[at]));
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        let land = session.layer;
+        if let Err(err) = session.board.set_layout(index) {
+            if matches!(err, Error::Disconnected) {
+                return Ok(self.lose(session, back, &err));
+            }
+            self.notice = Some(err.to_string());
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        self.notice = Some(format!("layout {index} {}", names[index]));
+        self.reread(session, back, land)
+    }
+
+    /// Reads the open keyboard again and lands on `land`.
+    fn reread(
+        &mut self,
+        session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        land: u8,
+    ) -> Result<Step> {
+        let candidate = session.board.reopen();
+        match vial::Load::begin(&candidate) {
+            Ok(load) => {
+                self.kind = ModelKind::Open {
+                    candidates: vec![candidate],
+                    cursor: 0,
+                    load,
+                    land,
+                };
+                self.pump()
+            }
+            Err(err) => {
+                self.kind = ModelKind::Pick {
+                    candidates: vec![candidate],
+                    cursor: 0,
+                    failed: Some((0, why_not(&err))),
+                };
+                Ok(Step::Continue)
+            }
+        }
     }
 
     /// Writes every staged change. A write that needs the unlock parks here as a hold, and the
@@ -626,10 +870,11 @@ impl Model {
         if quit {
             return Ok(Step::Quit);
         }
+        let to = session.board.writes_to();
         self.notice = Some(match count {
             0 => "nothing to write".to_string(),
-            1 => "wrote 1 change to the keyboard".to_string(),
-            _ => format!("wrote {count} changes to the keyboard"),
+            1 => format!("wrote 1 change to {to}"),
+            _ => format!("wrote {count} changes to {to}"),
         });
         self.kind = back_to(session, back);
         Ok(Step::Continue)
@@ -976,7 +1221,10 @@ impl Model {
                 return self.choose_lost();
             }
             ModelKind::Map(session) => self.kind = searching(session, Target::Key),
-            ModelKind::Sheet { session, spot } => self.kind = open_cell(session, spot),
+            ModelKind::Sheet { session, spot } => match flag_toggle(&session.board, spot) {
+                Some(write) => self.land(session, write, Some(spot)),
+                None => self.kind = open_cell(session, spot),
+            },
             ModelKind::Palette {
                 session,
                 back,
@@ -985,7 +1233,7 @@ impl Model {
             } => {
                 let rows = palette(&session.board, &text);
                 match palette_pick(&text, rows.len(), cursor) {
-                    Some(at) => return self.go(session, back, rows[at].2),
+                    Some(at) => return self.go(session, back, rows[at].2, command_arg(&text)),
                     // Typed, and nothing matches: the popup says so and stays.
                     None if rows.is_empty() => {
                         self.kind = ModelKind::Palette {
@@ -1038,6 +1286,7 @@ impl Model {
                     candidates,
                     cursor,
                     load,
+                    land: 0,
                 };
                 self.pump()
             }
@@ -1067,6 +1316,7 @@ impl Model {
             mut candidates,
             cursor,
             mut load,
+            land,
         } = mem::replace(&mut self.kind, vacant())
         else {
             return Ok(Step::Continue);
@@ -1077,7 +1327,9 @@ impl Model {
                 Ok(_) if load.ready() => {
                     let board = load.finish(candidates.remove(cursor));
                     let more = board.reading().is_some();
-                    self.kind = ModelKind::Map(Session::mapped(board));
+                    let mut session = Session::mapped(board);
+                    session.layer = land.min(session.board.layer_count().saturating_sub(1));
+                    self.kind = ModelKind::Map(session);
                     return Ok(if more { Step::Working } else { Step::Continue });
                 }
                 Ok(_) if Instant::now() < until => {}
@@ -1086,6 +1338,7 @@ impl Model {
                         candidates,
                         cursor,
                         load,
+                        land,
                     };
                     return Ok(Step::Working);
                 }
@@ -1131,6 +1384,29 @@ impl Model {
                 macros[spot.row].remove(spot.col);
                 Some(vial::Write::Macros(macros))
             }
+            vial::Tab::Section(kind) => {
+                let slot = board
+                    .section(kind)
+                    .get(spot.row)
+                    .map(|row| vial::section_slot(kind, row, spot.col));
+                match slot {
+                    Some(vial::Slot::Column(col)) => {
+                        let blank = match kind.columns()[col].cell {
+                            vial::Cell::Binding => "&none",
+                            _ => "",
+                        };
+                        Some(section_edit(board, kind, spot.row, |row| {
+                            row.cells[col] = blank.to_string();
+                        }))
+                    }
+                    Some(vial::Slot::Tail(index)) => {
+                        Some(section_edit(board, kind, spot.row, |row| {
+                            row.tail.remove(index);
+                        }))
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
         match write {
@@ -1147,6 +1423,24 @@ impl Model {
             self.kind = kind;
             return Ok(Step::Continue);
         };
+        if let vial::Tab::Section(kind) = spot.tab {
+            // A section's bindings take a tap only: `t`, as in the key list.
+            self.kind = if kind.tail().is_some()
+                && matches!(step, keys::Step::Tap)
+                && spot.col > kind.columns().len()
+            {
+                searching(
+                    session,
+                    Target::Cell {
+                        spot,
+                        insert: Some(Press::Tap),
+                    },
+                )
+            } else {
+                ModelKind::Sheet { session, spot }
+            };
+            return Ok(Step::Continue);
+        }
         if spot.tab != vial::Tab::Macros {
             self.kind = ModelKind::Sheet { session, spot };
             return Ok(Step::Continue);
@@ -1182,23 +1476,40 @@ impl Model {
             self.kind = kind;
             return Ok(Step::Continue);
         };
-        let len = if spot.tab == vial::Tab::Macros {
-            session.board.macros()[spot.row].len()
-        } else {
-            0
+        // The movable cells: macro steps, or a section row's bindings after its properties.
+        let (offset, len) = match spot.tab {
+            vial::Tab::Macros => (0, session.board.macros()[spot.row].len()),
+            vial::Tab::Section(kind) => (
+                1 + kind.columns().len(),
+                session
+                    .board
+                    .section(kind)
+                    .get(spot.row)
+                    .map_or(0, |row| row.tail.len()),
+            ),
+            _ => (0, 0),
         };
-        let to = spot.col as isize + isize::from(delta);
-        if spot.col >= len || to < 0 || to as usize >= len {
+        let at = spot.col as isize - offset as isize;
+        let to = at + isize::from(delta);
+        if at < 0 || at as usize >= len || to < 0 || to as usize >= len {
             self.kind = ModelKind::Sheet { session, spot };
             return Ok(Step::Continue);
         }
-        let mut macros = session.board.macros().to_vec();
-        macros[spot.row].swap(spot.col, to as usize);
+        let write = match spot.tab {
+            vial::Tab::Section(kind) => section_edit(&session.board, kind, spot.row, |row| {
+                row.tail.swap(at as usize, to as usize);
+            }),
+            _ => {
+                let mut macros = session.board.macros().to_vec();
+                macros[spot.row].swap(at as usize, to as usize);
+                vial::Write::Macros(macros)
+            }
+        };
         let spot = vial::Spot {
-            col: to as usize,
+            col: (to + offset as isize) as usize,
             ..spot
         };
-        self.land(session, vial::Write::Macros(macros), Some(spot));
+        self.land(session, write, Some(spot));
         Ok(Step::Continue)
     }
 
@@ -1262,6 +1573,11 @@ impl Model {
     ) -> Result<Step> {
         let mut session = session;
         match (question, ch) {
+            (Question::RemoveLayer { layer, .. }, 'y' | 'Y') => {
+                let op = vial::LayerOp::Remove(layer);
+                return self.change_layers(session, back, op, layer.saturating_sub(1));
+            }
+            (Question::RemoveLayer { .. }, 'n' | 'N') => self.kind = back_to(session, back),
             (Question::Quit { .. }, 'w' | 'W' | 'y' | 'Y') => {
                 return self.save(session, back, true)
             }
@@ -1417,7 +1733,7 @@ impl Model {
                     };
                     return Ok(Step::Continue);
                 }
-                Ok(_) => why = "no Vial keyboard answers yet: wake it or plug it in".to_string(),
+                Ok(_) => why = "no keyboard answers yet: wake it or plug it in".to_string(),
                 Err(err) => why = err.to_string(),
             },
             Some(choice @ (Choice::Keep | Choice::Revert)) => {
@@ -1625,6 +1941,29 @@ fn open_cell(session: Session<Mapping>, spot: vial::Spot) -> ModelKind {
                 )
             }
         },
+        vial::Tab::Section(kind) => {
+            let Some(row) = board.section(kind).get(spot.row) else {
+                return ModelKind::Sheet { session, spot };
+            };
+            match vial::section_slot(kind, row, spot.col) {
+                vial::Slot::Name if kind == vial::Kind::Encoders => {
+                    return ModelKind::Sheet { session, spot };
+                }
+                vial::Slot::Name => Some((Field::Name, row.name.clone())),
+                vial::Slot::Column(col) if kind.columns()[col].cell == vial::Cell::Binding => None,
+                vial::Slot::Column(col) => Some((Field::Prop { col }, row.cells[col].clone())),
+                vial::Slot::Tail(_) => None,
+                vial::Slot::Append => {
+                    return searching(
+                        session,
+                        Target::Cell {
+                            spot,
+                            insert: Some(Press::Tap),
+                        },
+                    )
+                }
+            }
+        }
         _ => None,
     };
     match field {
@@ -1638,6 +1977,27 @@ fn open_cell(session: Session<Mapping>, spot: vial::Spot) -> ModelKind {
     }
 }
 
+/// Enter on a flag cell of a keymap-file section sets or clears it at once.
+fn flag_toggle(board: &vial::Board, spot: vial::Spot) -> Option<vial::Write> {
+    let vial::Tab::Section(kind) = spot.tab else {
+        return None;
+    };
+    let row = board.section(kind).get(spot.row)?;
+    let vial::Slot::Column(col) = vial::section_slot(kind, row, spot.col) else {
+        return None;
+    };
+    if kind.columns()[col].cell != vial::Cell::Flag {
+        return None;
+    }
+    Some(section_edit(board, kind, spot.row, |row| {
+        row.cells[col] = if row.cells[col].is_empty() {
+            "yes".to_string()
+        } else {
+            String::new()
+        }
+    }))
+}
+
 impl Model {
     /// Enter in the key list stages the highlighted hit at once: the board already previews it,
     /// and `u` takes it back. A `(kc)` code first asks for the basic key that fills it.
@@ -1649,6 +2009,89 @@ impl Model {
         wrap: Option<Wrap>,
         target: Target,
     ) {
+        let mut session = session;
+        // A query that starts with `&` is a binding being typed, as `&kp A`. On a keymap
+        // file or a Studio board, Enter takes the highlighted behavior or value; once the
+        // behavior has every parameter it takes, the binding is staged.
+        if let Browse::Find { query, back } = &browse {
+            if query.as_str().starts_with('&') {
+                let typed = query.as_str().to_string();
+                let hits = session.list(&browse).hits;
+                let mut words: Vec<String> = typed.split_whitespace().map(str::to_string).collect();
+                if let Some(hit) = hits.get(cursor) {
+                    if !typed.ends_with(' ') {
+                        words.pop();
+                    }
+                    words.push(hit.legend.clone());
+                }
+                let next = words.join(" ");
+                match session.board.typed_complete(&format!("{next} ")) {
+                    None => {
+                        self.notice = Some(
+                            "typed bindings work on a ZMK keyboard or a keymap file".to_string(),
+                        );
+                    }
+                    Some(false) => {
+                        let back = ShelfIndex(back.0);
+                        self.kind = ModelKind::Search {
+                            session,
+                            browse: Browse::Find {
+                                query: Query(format!("{next} ")),
+                                back,
+                            },
+                            cursor: 0,
+                            wrap,
+                            target,
+                        };
+                        return;
+                    }
+                    Some(true) => {
+                        let code = session.board.intern(&next);
+                        match (&target, code, session.selection) {
+                            (Target::Key, Some(code), Some(place)) => {
+                                let layer = session.layer;
+                                self.land(session, vial::Write::Key { layer, place, code }, None);
+                                return;
+                            }
+                            (
+                                Target::Cell {
+                                    spot:
+                                        spot @ vial::Spot {
+                                            tab: vial::Tab::Section(kind),
+                                            ..
+                                        },
+                                    insert,
+                                },
+                                ..,
+                            ) => {
+                                let (write, after) = section_text(
+                                    &session.board,
+                                    *kind,
+                                    *spot,
+                                    insert.is_some(),
+                                    next,
+                                );
+                                self.land(session, write, Some(after));
+                                return;
+                            }
+                            _ => {
+                                self.notice = Some(
+                                    "a typed binding goes on a key or a file's tab".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+                self.kind = ModelKind::Search {
+                    session,
+                    browse,
+                    cursor,
+                    wrap,
+                    target,
+                };
+                return;
+            }
+        }
         let found = session.list(&browse).hits.into_iter().nth(cursor);
         let code = match (found, &wrap) {
             // Vial fills a `(kc)` code with a basic key only.
@@ -1756,8 +2199,58 @@ fn cell_write(
             };
             (vial::Write::Macros(macros), vial::Spot { col, ..spot })
         }
+        vial::Tab::Section(kind) => match board.binding_text(code) {
+            Some(text) => section_text(board, kind, spot, insert.is_some(), text),
+            None => (
+                vial::Write::Section(kind, board.section(kind).to_vec()),
+                spot,
+            ),
+        },
     };
     (write, spot)
+}
+
+/// A binding for a section cell: a binding property, a tail binding replaced, or one added at
+/// the cursor. The cursor moves past an added one, so the next follows it.
+fn section_text(
+    board: &vial::Board,
+    kind: vial::Kind,
+    spot: vial::Spot,
+    insert: bool,
+    text: String,
+) -> (vial::Write, vial::Spot) {
+    let mut rows = board.section(kind).to_vec();
+    let mut col = spot.col;
+    if let Some(row) = rows.get_mut(spot.row) {
+        match vial::section_slot(kind, row, spot.col) {
+            vial::Slot::Column(index) => row.cells[index] = text,
+            vial::Slot::Tail(index) if !insert => row.tail[index] = text,
+            vial::Slot::Tail(index) => {
+                row.tail.insert(index, text);
+                col += 1;
+            }
+            vial::Slot::Append => {
+                row.tail.push(text);
+                col += 1;
+            }
+            vial::Slot::Name => {}
+        }
+    }
+    (vial::Write::Section(kind, rows), vial::Spot { col, ..spot })
+}
+
+/// One section row changed by `edit`, staged as the whole section.
+fn section_edit(
+    board: &vial::Board,
+    kind: vial::Kind,
+    row: usize,
+    edit: impl FnOnce(&mut vial::Record),
+) -> vial::Write {
+    let mut rows = board.section(kind).to_vec();
+    if let Some(record) = rows.get_mut(row) {
+        edit(record);
+    }
+    vial::Write::Section(kind, rows)
 }
 
 /// Enter in a field: the change, and where the cursor goes. `None` when there is nothing
@@ -1771,6 +2264,19 @@ fn field_write(
     let number = text.parse::<u16>().unwrap_or(0);
     let board = &session.board;
     match field {
+        Field::Name | Field::Prop { .. } => {
+            let vial::Tab::Section(kind) = spot.tab else {
+                return None;
+            };
+            if matches!(field, Field::Name) && text.is_empty() {
+                return None;
+            }
+            let write = section_edit(board, kind, spot.row, |row| match field {
+                Field::Prop { col } => row.cells[col] = text.trim().to_string(),
+                _ => row.name = text.to_string(),
+            });
+            Some((write, spot))
+        }
         Field::Term => {
             let mut entry = board.tap_dances()[spot.row];
             entry.term = number;
@@ -1815,14 +2321,20 @@ fn sheet_rows(board: &vial::Board, tab: vial::Tab) -> usize {
         vial::Tab::TapDance => board.tap_dances().len(),
         vial::Tab::Combos => board.combos().len(),
         vial::Tab::Macros => board.macros().len(),
+        vial::Tab::Section(kind) => board.section(kind).len(),
     }
 }
 
-/// Five fields for tap dances and combos. A macro row is its steps plus the append slot.
+/// Five fields for tap dances and combos. A macro row is its steps plus the append slot; a
+/// section row its name, its properties, then its bindings and their append slot.
 fn sheet_cols(board: &vial::Board, spot: vial::Spot) -> usize {
     match spot.tab {
         vial::Tab::TapDance | vial::Tab::Combos => 5,
         vial::Tab::Macros => board.macros().get(spot.row).map_or(0, Vec::len) + 1,
+        vial::Tab::Section(kind) => board
+            .section(kind)
+            .get(spot.row)
+            .map_or(1, |row| vial::section_width(kind, row)),
     }
 }
 
@@ -1894,11 +2406,19 @@ enum Cmd {
     Help,
     Quit,
     ForceQuit,
+    LayerAdd,
+    LayerRemove,
+    LayerRename,
+    LayerLeft,
+    LayerRight,
+    Layout,
+    RowAdd,
+    RowRemove,
 }
 
 /// Every `:` command: its names (Tab fills in the first), and what it does.
 /// The `:` rows of the find-anything list and its `run` group both read this.
-const COMMANDS: [(Cmd, &[&str], &str); 7] = [
+const COMMANDS: [(Cmd, &[&str], &str); 15] = [
     (
         Cmd::Write,
         &["w", "write"],
@@ -1918,6 +2438,38 @@ const COMMANDS: [(Cmd, &[&str], &str); 7] = [
         "quit, asking first when changes are unsaved",
     ),
     (Cmd::ForceQuit, &["q!"], "quit without writing"),
+    (Cmd::LayerAdd, &["layer-add"], "add a layer after the last"),
+    (Cmd::LayerRemove, &["layer-remove"], "remove this layer"),
+    (
+        Cmd::LayerRename,
+        &["layer-rename"],
+        "name this layer: :layer-rename Sym",
+    ),
+    (
+        Cmd::LayerLeft,
+        &["layer-left"],
+        "move this layer one place left",
+    ),
+    (
+        Cmd::LayerRight,
+        &["layer-right"],
+        "move this layer one place right",
+    ),
+    (
+        Cmd::Layout,
+        &["layout"],
+        "list physical layouts, or switch: :layout 1",
+    ),
+    (
+        Cmd::RowAdd,
+        &["add"],
+        "on a keymap file's tab: add a combo, macro, or behavior: :add name",
+    ),
+    (
+        Cmd::RowRemove,
+        &["remove"],
+        "on a keymap file's tab: remove this row",
+    ),
 ];
 
 /// The name Tab fills in after `:`.
@@ -1928,9 +2480,59 @@ fn command_name(command: Cmd) -> &'static str {
         .map_or("", |(_, names, _)| names[0])
 }
 
-/// After `:`: each command with a name that starts with `typed`, every one when nothing is typed.
-/// An exact name sorts first, so `:q` runs quit and not `:q!`; then table order, so `:wr` writes.
+/// What follows the command's name on the `:` line, trimmed.
+fn command_arg(text: &str) -> &str {
+    text.strip_prefix(':')
+        .and_then(|line| line.trim_start().split_once(char::is_whitespace))
+        .map_or("", |(_, rest)| rest.trim())
+}
+
+fn layout_list(names: &[String], at: usize) -> String {
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            if index == at {
+                format!("{index} {name}*")
+            } else {
+                format!("{index} {name}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// An index, or the one name that starts with `arg`.
+fn layout_pick(names: &[String], arg: &str) -> std::result::Result<usize, String> {
+    if let Ok(index) = arg.parse::<usize>() {
+        return if index < names.len() {
+            Ok(index)
+        } else {
+            Err(format!("layouts are 0..{}", names.len().saturating_sub(1)))
+        };
+    }
+    let needle = arg.to_lowercase();
+    let hits: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            let name = name.to_lowercase();
+            name == needle || name.starts_with(&needle)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    match *hits.as_slice() {
+        [index] => Ok(index),
+        [] => Err(format!("no layout {arg}")),
+        _ => Err(format!("{arg} matches more than one layout")),
+    }
+}
+
+/// After `:`: each command with a name that starts with `typed`'s first word, every one when
+/// nothing is typed. An exact name sorts first, so `:q` runs quit and not `:q!`; then table
+/// order, so `:wr` writes. The rest of `typed` is the command's argument.
 fn command_rows(typed: &str) -> Vec<(&'static str, String, Goal)> {
+    let typed = typed.split_whitespace().next().unwrap_or("");
     let names = |names: &[&str]| -> String {
         names
             .iter()
@@ -2095,7 +2697,11 @@ fn mode_of(kind: &ModelKind) -> vial::Mode {
             match spot.tab {
                 vial::Tab::TapDance => "TAP DANCE",
                 vial::Tab::Combos => "COMBOS",
-                vial::Tab::Macros => "MACROS",
+                vial::Tab::Macros | vial::Tab::Section(vial::Kind::Macros) => "MACROS",
+                vial::Tab::Section(vial::Kind::Combos) => "COMBOS",
+                vial::Tab::Section(vial::Kind::Behaviors) => "BEHAVIORS",
+                vial::Tab::Section(vial::Kind::Conditional) => "CONDITIONAL",
+                vial::Tab::Section(vial::Kind::Encoders) => "ENCODERS",
             },
             Browse,
         ),
@@ -2151,6 +2757,7 @@ fn render(
             candidates,
             cursor,
             load,
+            ..
         } => vial::pick_text(
             candidates,
             *cursor,
@@ -2220,9 +2827,11 @@ fn render(
             };
             // What Enter would stage, by the same rules as `confirm_search` and `cell_write`:
             // after a `(kc)` pick only a basic key fills it, and a macro step keeps its kind.
+            // A binding being typed has no keycode until it is staged.
             let preview = listed
                 .hits
                 .get(*cursor)
+                .filter(|_| !query.starts_with('&'))
                 .and_then(|hit| match wrap {
                     Some(outer) => (hit.code <= 0xFF).then_some(outer.code | hit.code),
                     None => Some(hit.code),

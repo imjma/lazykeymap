@@ -1,17 +1,22 @@
 [package]
-name = "lazyvial"
+name = "lazykeymap"
 version = "0.2.0"
 edition = "2021"
-description = "Remap a Vial keyboard from the terminal"
+description = "Remap a Vial or ZMK Studio keyboard from the terminal"
 license = "MIT"
-repository = "https://github.com/imjma/lazyvial"
-homepage = "https://github.com/imjma/lazyvial"
+repository = "https://github.com/imjma/lazykeymap"
+homepage = "https://github.com/imjma/lazykeymap"
 readme = "README.md"
-keywords = ["vial", "qmk", "keyboard", "keymap", "tui"]
+keywords = ["vial", "qmk", "zmk", "keymap", "tui"]
 categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
+btleplug = "0.13.5"
 crossterm = "0.28"
+futures = "0.3.34"
 hidapi = "2"
 serde_json = "1"
+serialport = "4"
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "time"] }
+uuid = "1.29.3"
 xz2 = "0.1"

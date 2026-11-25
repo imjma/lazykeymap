@@ -1,50 +1,50 @@
 #[test]
-fn remap_persists() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
+fn remap_persists() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
         .locked(&[(0, 0), (0, 1)]);
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert!(app.screen().text().contains("locked"));
     assert!(app.screen().text().contains('▌'));
     assert!(app.screen().text().contains("NO"));
     assert!(!app.screen().text().contains("Hid"));
     // vial-qmk takes a plain keycode on a locked board. No unlock.
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Char('e'))?;
-    app.handle(lazyvial::Event::Char('s'))?;
-    app.handle(lazyvial::Event::Char('c'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('e'))?;
+    app.handle(lazykeymap::Event::Char('s'))?;
+    app.handle(lazykeymap::Event::Char('c'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains("1 unsaved"));
-    app.handle(lazyvial::Event::Char(':'))?;
-    app.handle(lazyvial::Event::Char('w'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Char(':'))?;
+    app.handle(lazykeymap::Event::Char('w'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(!app.screen().text().contains("hold "));
     assert!(!app.screen().text().contains("unsaved"));
     assert!(app.screen().text().contains('▌'));
     assert!(app.screen().text().contains("Esc"));
     drop(app);
-    let app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+    let app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert!(app.screen().text().contains('▌'));
     assert!(app.screen().text().contains("Esc"));
     Ok(())
 }
 
 #[test]
-fn hold_marks_the_unlock_keys_on_a_full_board() -> lazyvial::Result<()> {
+fn hold_marks_the_unlock_keys_on_a_full_board() -> lazykeymap::Result<()> {
     let amber = "48;2;224;175;104";
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?
         .locked(&[(0, 0), (0, 1)]);
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert!(!app.screen().text().contains(amber));
     for event in [
-        lazyvial::Event::Char('/'),
-        lazyvial::Event::Char('b'),
-        lazyvial::Event::Char('o'),
-        lazyvial::Event::Char('o'),
-        lazyvial::Event::Char('t'),
-        lazyvial::Event::Confirm,
-        lazyvial::Event::Char(':'),
-        lazyvial::Event::Char('w'),
-        lazyvial::Event::Confirm,
+        lazykeymap::Event::Char('/'),
+        lazykeymap::Event::Char('b'),
+        lazykeymap::Event::Char('o'),
+        lazykeymap::Event::Char('o'),
+        lazykeymap::Event::Char('t'),
+        lazykeymap::Event::Confirm,
+        lazykeymap::Event::Char(':'),
+        lazykeymap::Event::Char('w'),
+        lazykeymap::Event::Confirm,
     ] {
         app.handle(event)?;
     }
@@ -56,23 +56,23 @@ fn hold_marks_the_unlock_keys_on_a_full_board() -> lazyvial::Result<()> {
     let text = app.screen().text();
     assert!(text.contains("hold 0,0+0,1"), "{text}");
     assert!(amber_keys(text), "{text}");
-    app.handle(lazyvial::Event::Tick)?;
+    app.handle(lazykeymap::Event::Tick)?;
     assert!(!amber_keys(app.screen().text()));
     Ok(())
 }
 
 #[test]
-fn pick_when_two() -> lazyvial::Result<()> {
-    let alpha =
-        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.named("alpha");
-    let beta =
-        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/other.json"))?.named("beta");
-    let mut app = lazyvial::App::new(
-        lazyvial::MemoryBoard::choose(&[alpha, beta])?,
-        lazyvial::TestScreen::new(40, 12),
+fn pick_when_two() -> lazykeymap::Result<()> {
+    let alpha = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
+        .named("alpha");
+    let beta = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/other.json"))?
+        .named("beta");
+    let mut app = lazykeymap::App::new(
+        lazykeymap::MemoryBoard::choose(&[alpha, beta])?,
+        lazykeymap::TestScreen::new(40, 12),
     );
     // The cursor's card starts with the accent bar.
-    let on = |app: &lazyvial::App<lazyvial::TestScreen>, name: &str| {
+    let on = |app: &lazykeymap::App<lazykeymap::TestScreen>, name: &str| {
         let mut text = String::new();
         let mut chars = app.screen().text().chars();
         while let Some(ch) = chars.next() {
@@ -86,44 +86,47 @@ fn pick_when_two() -> lazyvial::Result<()> {
     };
     assert!(app.screen().text().contains("choose"));
     assert!(on(&app, "alpha"));
-    app.handle(lazyvial::Event::Char('j'))?;
+    app.handle(lazykeymap::Event::Char('j'))?;
     assert!(on(&app, "beta"));
-    app.handle(lazyvial::Event::Left)?;
+    app.handle(lazykeymap::Event::Left)?;
     assert!(on(&app, "alpha"));
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazykeymap::Event::Right)?;
     assert!(on(&app, "beta"));
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains("layer 0/"));
     assert!(app.screen().text().contains("beta"));
     Ok(())
 }
 
 #[test]
-fn keymap_opens_before_tap_dances_arrive() -> lazyvial::Result<()> {
+fn keymap_opens_before_tap_dances_arrive() -> lazykeymap::Result<()> {
     let board =
-        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.tap_dances(4);
-    let other = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
-    let mut app = lazyvial::App::new(
-        lazyvial::MemoryBoard::choose(&[board, other])?,
-        lazyvial::TestScreen::new(100, 16),
+        lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.tap_dances(4);
+    let other = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazykeymap::App::new(
+        lazykeymap::MemoryBoard::choose(&[board, other])?,
+        lazykeymap::TestScreen::new(100, 16),
     );
     // The keymap is on screen while the tap dances are still being read.
     assert_eq!(
-        app.handle(lazyvial::Event::Confirm)?,
-        lazyvial::Step::Working
+        app.handle(lazykeymap::Event::Confirm)?,
+        lazykeymap::Step::Working
     );
     let text = app.screen().text();
     assert!(text.contains("layer 0/"), "{text}");
     assert!(text.contains("reading tap dances"), "{text}");
     assert!(text.contains("Tap Dance…"), "{text}");
     // Its tab is there already, and says it is still being read. Edit keys do nothing yet.
-    app.handle(lazyvial::Event::Tab)?;
-    app.handle(lazyvial::Event::Char('x'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Tab)?;
+    app.handle(lazykeymap::Event::Char('x'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     let text = app.screen().text();
-    assert!(text.contains("lazyvial is still reading"), "{text}");
+    assert!(text.contains("lazykeymap is still reading"), "{text}");
     assert!(text.contains("◌ now tap dances"), "{text}");
-    assert_eq!(app.handle(lazyvial::Event::Tick)?, lazyvial::Step::Continue);
+    assert_eq!(
+        app.handle(lazykeymap::Event::Tick)?,
+        lazykeymap::Step::Continue
+    );
     let text = app.screen().text();
     assert!(!text.contains("reading"), "{text}");
     assert!(text.contains("tap dance 1/4"), "{text}");
@@ -131,12 +134,12 @@ fn keymap_opens_before_tap_dances_arrive() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn encoder_writes_clockwise() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/encoder.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 8));
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Char('a'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+fn encoder_writes_clockwise() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/encoder.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 8));
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('a'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains('▌'));
     assert!(
         app.screen().text().contains("selected A"),
@@ -147,21 +150,21 @@ fn encoder_writes_clockwise() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn tick_does_not_repaint() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+fn tick_does_not_repaint() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     let paints = app.screen().paints();
-    app.handle(lazyvial::Event::Tick)?;
+    app.handle(lazykeymap::Event::Tick)?;
     assert_eq!(app.screen().paints(), paints);
     Ok(())
 }
 
 #[test]
-fn neighbors_keep_a_space() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn neighbors_keep_a_space() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":2},"layouts":{"keymap":[["0,0","0,1"]]}}"#,
     )?;
-    let app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 8));
+    let app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 8));
     let line = app
         .screen()
         .text()
@@ -175,11 +178,11 @@ fn neighbors_keep_a_space() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn pulled_row_shares_a_line() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn pulled_row_shares_a_line() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":2},"layouts":{"keymap":[["0,0"],[{"y":-1,"x":1},"0,1"]]}}"#,
     )?;
-    let app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 8));
+    let app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 8));
     let key_lines: Vec<_> = app
         .screen()
         .text()
@@ -191,12 +194,12 @@ fn pulled_row_shares_a_line() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn right_space_stays_on_the_thumb_row() -> lazyvial::Result<()> {
+fn right_space_stays_on_the_thumb_row() -> lazykeymap::Result<()> {
     // Cornix right Space: top-left is 1u below the thumb row, the key's top is not.
-    let board = lazyvial::MemoryBoard::from_definition(
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":2},"layouts":{"keymap":[[{"y":3.3},"0,0\n\n\n\n\n\n\n\nRow"],[{"r":-23,"rx":5.005815,"ry":4.741697,"x":2.634185,"y":0.638303},"0,1\n\n\n\n\n\n\n\nSpace"]]}}"#,
     )?;
-    let app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(80, 16));
+    let app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(80, 16));
     let text = app.screen().text();
     assert!(
         text.lines()
@@ -207,17 +210,17 @@ fn right_space_stays_on_the_thumb_row() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn tap_dance_shows_up_in_search() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn tap_dance_shows_up_in_search() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(
+    let mut app = lazykeymap::App::new(
         board.tap_dances(32).open()?,
-        lazyvial::TestScreen::new(40, 16),
+        lazykeymap::TestScreen::new(40, 16),
     );
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Char('t'))?;
-    app.handle(lazyvial::Event::Char('d'))?;
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('t'))?;
+    app.handle(lazykeymap::Event::Char('d'))?;
     assert!(
         app.screen().text().contains("> TD(0)"),
         "{}",
@@ -225,7 +228,7 @@ fn tap_dance_shows_up_in_search() -> lazyvial::Result<()> {
     );
     // Right walks the hits in reading order.
     for _ in 0..25 {
-        app.handle(lazyvial::Event::Right)?;
+        app.handle(lazykeymap::Event::Right)?;
     }
     assert!(
         app.screen().text().contains("> TD(25)"),
@@ -236,13 +239,13 @@ fn tap_dance_shows_up_in_search() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn key_grid_moves_by_what_is_drawn_and_closes_without_esc() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn key_grid_moves_by_what_is_drawn_and_closes_without_esc() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(100, 24));
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(100, 24));
     // Where the highlighted hit is drawn: (line, column) of its `>` marker.
-    let marker = |app: &lazyvial::App<lazyvial::TestScreen>| {
+    let marker = |app: &lazykeymap::App<lazykeymap::TestScreen>| {
         let mut plain = String::new();
         let mut escape = false;
         for ch in app.screen().text().chars() {
@@ -259,41 +262,41 @@ fn key_grid_moves_by_what_is_drawn_and_closes_without_esc() -> lazyvial::Result<
             .find_map(|(row, line)| line.find(" > ").map(|at| (row, line[..at].chars().count())))
             .expect("a highlighted hit")
     };
-    app.handle(lazyvial::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('/'))?;
     let start = marker(&app);
     // Down lands right under it, Right right beside it, and back again.
-    app.handle(lazyvial::Event::Down)?;
+    app.handle(lazykeymap::Event::Down)?;
     let below = marker(&app);
     assert_eq!((below.0, below.1), (start.0 + 1, start.1));
-    app.handle(lazyvial::Event::Up)?;
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazykeymap::Event::Up)?;
+    app.handle(lazykeymap::Event::Right)?;
     let beside = marker(&app);
     assert!(
         beside.0 == start.0 && beside.1 > start.1,
         "{beside:?} {start:?}"
     );
     // Backspace with nothing typed closes the list, for a keyboard without Esc.
-    app.handle(lazyvial::Event::Backspace)?;
+    app.handle(lazykeymap::Event::Backspace)?;
     assert!(!app.screen().text().contains("[Basic]"));
     Ok(())
 }
 
 #[test]
-fn key_list_previews_the_pick_on_the_key_and_esc_leaves_nothing() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn key_list_previews_the_pick_on_the_key_and_esc_leaves_nothing() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(100, 24));
-    app.handle(lazyvial::Event::Char('/'))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(100, 24));
+    app.handle(lazykeymap::Event::Char('/'))?;
     for ch in "esc".chars() {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
     // Before Enter, the key shows the pick and the status says what changes.
     let text = app.screen().text();
     assert!(text.contains("NO → Esc"), "{text}");
     assert!(text.contains("› esc"), "{text}");
     // Esc drops the preview; nothing was staged.
-    app.handle(lazyvial::Event::Cancel)?;
+    app.handle(lazykeymap::Event::Cancel)?;
     let text = app.screen().text();
     assert!(
         text.contains("selected NO") && !text.contains("unsaved"),
@@ -303,32 +306,32 @@ fn key_list_previews_the_pick_on_the_key_and_esc_leaves_nothing() -> lazyvial::R
 }
 
 #[test]
-fn enter_opens_the_catalog() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn enter_opens_the_catalog() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Confirm)?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Confirm)?;
     let text = app.screen().text();
     assert!(text.contains("[Basic]"), "{text}");
     assert!(text.contains("> NO"), "{text}");
-    app.handle(lazyvial::Event::Down)?;
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Down)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(
         app.screen().text().contains("selected TRNS"),
         "{}",
         app.screen().text()
     );
-    app.handle(lazyvial::Event::Confirm)?;
-    app.handle(lazyvial::Event::Char('e'))?;
-    app.handle(lazyvial::Event::Backspace)?;
+    app.handle(lazykeymap::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Char('e'))?;
+    app.handle(lazykeymap::Event::Backspace)?;
     let text = app.screen().text();
     assert!(text.contains("[Basic]"), "{text}");
     assert!(text.contains("> NO"), "{text}");
-    app.handle(lazyvial::Event::Char('e'))?;
-    app.handle(lazyvial::Event::Char('s'))?;
-    app.handle(lazyvial::Event::Char('c'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Char('e'))?;
+    app.handle(lazykeymap::Event::Char('s'))?;
+    app.handle(lazykeymap::Event::Char('c'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(
         app.screen().text().contains("selected Esc"),
         "{}",
@@ -338,24 +341,24 @@ fn enter_opens_the_catalog() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn arrows_follow_the_drawn_keys() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(120, 24));
+fn arrows_follow_the_drawn_keys() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(120, 24));
     let start_row = bracket_row(app.screen().text());
     let start_col = bracket_col(app.screen().text());
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazykeymap::Event::Right)?;
     assert_eq!(bracket_row(app.screen().text()), start_row);
     assert!(bracket_col(app.screen().text()) > start_col);
-    app.handle(lazyvial::Event::Left)?;
+    app.handle(lazykeymap::Event::Left)?;
     assert_eq!(bracket_col(app.screen().text()), start_col);
-    app.handle(lazyvial::Event::Down)?;
+    app.handle(lazykeymap::Event::Down)?;
     let mid = bracket_row(app.screen().text());
     assert!(mid > start_row);
-    app.handle(lazyvial::Event::Down)?;
-    app.handle(lazyvial::Event::Down)?;
+    app.handle(lazykeymap::Event::Down)?;
+    app.handle(lazykeymap::Event::Down)?;
     let low = bracket_row(app.screen().text());
     assert!(low > mid, "{}", app.screen().text());
-    app.handle(lazyvial::Event::Up)?;
+    app.handle(lazykeymap::Event::Up)?;
     assert!(bracket_row(app.screen().text()) < low);
     Ok(())
 }
@@ -399,22 +402,23 @@ fn visible_columns(text: &str) -> usize {
 }
 
 #[test]
-fn layer_key_keeps_its_color() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn layer_key_keeps_its_color() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":3},"layouts":{"keymap":[["0,0","0,1","0,2"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.layers(2).open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Char('/'))?;
+    let mut app =
+        lazykeymap::App::new(board.layers(2).open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Char('/'))?;
     for ch in ['m', 'o', '(', '1', ')'] {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
     assert!(
         app.screen().text().contains("> MO(1)"),
         "{}",
         app.screen().text()
     );
-    app.handle(lazyvial::Event::Confirm)?;
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazykeymap::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Right)?;
     let text = app.screen().text();
     assert!(
         text.lines()
@@ -433,36 +437,36 @@ fn layer_key_keeps_its_color() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn vim_moves_like_arrows_on_corne() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(120, 24));
+fn vim_moves_like_arrows_on_corne() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(120, 24));
     let start_row = bracket_row(app.screen().text());
     let start_col = bracket_col(app.screen().text());
-    app.handle(lazyvial::Event::Char('l'))?;
+    app.handle(lazykeymap::Event::Char('l'))?;
     assert_eq!(bracket_row(app.screen().text()), start_row);
     assert!(bracket_col(app.screen().text()) > start_col);
-    app.handle(lazyvial::Event::Char('h'))?;
+    app.handle(lazykeymap::Event::Char('h'))?;
     assert_eq!(bracket_col(app.screen().text()), start_col);
-    app.handle(lazyvial::Event::Char('j'))?;
+    app.handle(lazykeymap::Event::Char('j'))?;
     let down = bracket_row(app.screen().text());
     assert!(down > start_row);
-    app.handle(lazyvial::Event::Char('k'))?;
+    app.handle(lazykeymap::Event::Char('k'))?;
     assert!(bracket_row(app.screen().text()) < down);
-    app.handle(lazyvial::Event::Char('G'))?;
+    app.handle(lazykeymap::Event::Char('G'))?;
     assert!(bracket_row(app.screen().text()) > start_row);
-    app.handle(lazyvial::Event::Char('g'))?;
+    app.handle(lazykeymap::Event::Char('g'))?;
     assert_eq!(bracket_row(app.screen().text()), start_row);
     assert_eq!(bracket_col(app.screen().text()), start_col);
     Ok(())
 }
 
 #[test]
-fn map_typing_x_does_not_open_search() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn map_typing_x_does_not_open_search() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Char('x'))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Char('x'))?;
     let text = app.screen().text();
     assert!(!text.lines().any(|line| line == "search"), "{text}");
     assert!(
@@ -473,21 +477,21 @@ fn map_typing_x_does_not_open_search() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn feature_bits_gate_keys() -> lazyvial::Result<()> {
+fn feature_bits_gate_keys() -> lazykeymap::Result<()> {
     let json = r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#;
-    let search = |board: lazyvial::MemoryBoard, query: &str| -> lazyvial::Result<String> {
-        let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
-        app.handle(lazyvial::Event::Char('/'))?;
+    let search = |board: lazykeymap::MemoryBoard, query: &str| -> lazykeymap::Result<String> {
+        let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 16));
+        app.handle(lazykeymap::Event::Char('/'))?;
         for ch in query.chars() {
-            app.handle(lazyvial::Event::Char(ch))?;
+            app.handle(lazykeymap::Event::Char(ch))?;
         }
         Ok(app.screen().text().to_string())
     };
     for query in ["layer lock", "caps word", "repeat"] {
-        let off = search(lazyvial::MemoryBoard::from_definition(json)?, query)?;
+        let off = search(lazykeymap::MemoryBoard::from_definition(json)?, query)?;
         assert!(!off.contains("> "), "{off}");
         let on = search(
-            lazyvial::MemoryBoard::from_definition(json)?.features(0b11, 1),
+            lazykeymap::MemoryBoard::from_definition(json)?.features(0b11, 1),
             query,
         )?;
         assert!(on.contains("> "), "{on}");
@@ -496,104 +500,105 @@ fn feature_bits_gate_keys() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn shelves_switch_and_typing_searches() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn shelves_switch_and_typing_searches() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(
+    let mut app = lazykeymap::App::new(
         board.macros(2).features(0b10, 0).tap_dances(32).open()?,
-        lazyvial::TestScreen::new(40, 16),
+        lazykeymap::TestScreen::new(40, 16),
     );
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Tab)?;
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Tab)?;
     let iso = app.screen().text();
     assert!(iso.contains("[ISO/JIS]"), "{iso}");
-    app.handle(lazyvial::Event::Tab)?;
+    app.handle(lazykeymap::Event::Tab)?;
     let layers = app.screen().text();
     assert!(layers.contains("[Layers]"), "{layers}");
     assert!(layers.contains("> Layer Lock"), "{layers}");
-    app.handle(lazyvial::Event::Tab)?;
+    app.handle(lazykeymap::Event::Tab)?;
     let quantum = app.screen().text();
     assert!(quantum.contains("[Quantum]"), "{quantum}");
     assert!(quantum.contains("> Boot"), "{quantum}");
     for _ in 0..4 {
-        app.handle(lazyvial::Event::BackTab)?;
+        app.handle(lazykeymap::Event::BackTab)?;
     }
     let macros = app.screen().text();
     assert!(macros.contains("[Macro]"), "{macros}");
     assert!(macros.contains("> M0"), "{macros}");
-    app.handle(lazyvial::Event::BackTab)?;
-    app.handle(lazyvial::Event::BackTab)?;
+    app.handle(lazykeymap::Event::BackTab)?;
+    app.handle(lazykeymap::Event::BackTab)?;
     let dance = app.screen().text();
     assert!(dance.contains("[Tap Dance]"), "{dance}");
     assert!(dance.contains("> TD(0)"), "{dance}");
-    app.handle(lazyvial::Event::Char('t'))?;
-    app.handle(lazyvial::Event::Char('d'))?;
+    app.handle(lazykeymap::Event::Char('t'))?;
+    app.handle(lazykeymap::Event::Char('d'))?;
     let found = app.screen().text();
     assert!(found.contains("search td"), "{found}");
     assert!(found.contains("> TD(0)"), "{found}");
 
-    let board = lazyvial::MemoryBoard::from_definition(
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::BackTab)?;
-    app.handle(lazyvial::Event::BackTab)?;
-    app.handle(lazyvial::Event::BackTab)?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::BackTab)?;
+    app.handle(lazykeymap::Event::BackTab)?;
+    app.handle(lazykeymap::Event::BackTab)?;
     let text = app.screen().text();
     assert!(text.contains("[App, Media and Mouse]"), "{text}");
     Ok(())
 }
 
 #[test]
-fn kc_code_takes_a_basic_key() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn kc_code_takes_a_basic_key() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.layers(3).open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Char('/'))?;
+    let mut app =
+        lazykeymap::App::new(board.layers(3).open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Char('/'))?;
     for ch in "lt1(".chars() {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     let text = app.screen().text();
     assert!(text.contains("LT1(kc) > [Basic]"), "{text}");
     for ch in "mo(2".chars() {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     let text = app.screen().text();
     assert!(text.contains("LT1(kc) > search mo(2"), "{text}");
     for _ in 0..4 {
-        app.handle(lazyvial::Event::Backspace)?;
+        app.handle(lazykeymap::Event::Backspace)?;
     }
     for ch in "esc".chars() {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     let text = app.screen().text();
     assert!(text.contains("selected L1(Esc)"), "{text}");
     Ok(())
 }
 
 #[test]
-fn slash_opens_search() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn slash_opens_search() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Char('/'))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Char('/'))?;
     let text = app.screen().text();
     assert!(text.contains("[Basic]"), "{text}");
     Ok(())
 }
 
 #[test]
-fn help_overlays_bindings() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(120, 80));
-    app.handle(lazyvial::Event::Char('?'))?;
+fn help_overlays_bindings() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(120, 80));
+    app.handle(lazykeymap::Event::Char('?'))?;
     let text = app.screen().text();
     assert!(text.lines().any(|line| line.contains("╭─ help ")), "{text}");
     assert!(help_sits_on_the_board(&text), "{text}");
@@ -603,13 +608,13 @@ fn help_overlays_bindings() -> lazyvial::Result<()> {
     assert!(text.contains("assign"), "{text}");
     assert!(text.contains("choose"), "{text}");
     assert!(text.contains("cancel"), "{text}");
-    app.handle(lazyvial::Event::Cancel)?;
+    app.handle(lazykeymap::Event::Cancel)?;
     let back = app.screen().text();
     assert!(!back.lines().any(|line| line == "help"), "{back}");
     assert!(back.contains('▌'), "{back}");
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Char('e'))?;
-    app.handle(lazyvial::Event::Char('?'))?;
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('e'))?;
+    app.handle(lazykeymap::Event::Char('?'))?;
     let during = app.screen().text();
     assert!(
         during.lines().any(|line| line.contains("╭─ help ")),
@@ -618,66 +623,66 @@ fn help_overlays_bindings() -> lazyvial::Result<()> {
     assert!(help_sits_on_the_board(&during), "{during}");
     assert!(during.contains("layer "), "{during}");
     assert!(during.contains("assign"), "{during}");
-    app.handle(lazyvial::Event::Cancel)?;
+    app.handle(lazykeymap::Event::Cancel)?;
     assert!(app.screen().text().contains("search e"));
-    app.handle(lazyvial::Event::Cancel)?;
-    app.handle(lazyvial::Event::Char('?'))?;
-    app.handle(lazyvial::Event::Char('q'))?;
+    app.handle(lazykeymap::Event::Cancel)?;
+    app.handle(lazykeymap::Event::Char('?'))?;
+    app.handle(lazykeymap::Event::Char('q'))?;
     let closed = app.screen().text();
     assert!(!closed.lines().any(|line| line == "help"), "{closed}");
     assert!(closed.contains('▌'), "{closed}");
     assert_eq!(
-        app.handle(lazyvial::Event::Char('q'))?,
-        lazyvial::Step::Quit
+        app.handle(lazykeymap::Event::Char('q'))?,
+        lazykeymap::Step::Quit
     );
     Ok(())
 }
 
 #[test]
-fn q_quits_from_map() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+fn q_quits_from_map() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert_eq!(
-        app.handle(lazyvial::Event::Char('q'))?,
-        lazyvial::Step::Quit
+        app.handle(lazykeymap::Event::Char('q'))?,
+        lazykeymap::Step::Quit
     );
     Ok(())
 }
 
 #[test]
-fn q_types_in_search() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn q_types_in_search() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
-    app.handle(lazyvial::Event::Char('/'))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 16));
+    app.handle(lazykeymap::Event::Char('/'))?;
     assert_eq!(
-        app.handle(lazyvial::Event::Char('q'))?,
-        lazyvial::Step::Continue
+        app.handle(lazykeymap::Event::Char('q'))?,
+        lazykeymap::Step::Continue
     );
     assert!(app.screen().text().contains("search q"));
     Ok(())
 }
 
 #[test]
-fn layers_wrap_with_brackets() -> lazyvial::Result<()> {
+fn layers_wrap_with_brackets() -> lazykeymap::Result<()> {
     let board =
-        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.layers(2);
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+        lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.layers(2);
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert!(app.screen().text().contains("layer 0/"));
-    app.handle(lazyvial::Event::Char(']'))?;
+    app.handle(lazykeymap::Event::Char(']'))?;
     assert!(app.screen().text().contains("layer 1/"));
-    app.handle(lazyvial::Event::Char('['))?;
+    app.handle(lazykeymap::Event::Char('['))?;
     assert!(app.screen().text().contains("layer 0/"));
     Ok(())
 }
 
 #[test]
-fn ctrl_k_finds_a_key_on_another_layer_and_runs_commands() -> lazyvial::Result<()> {
-    use lazyvial::Event;
+fn ctrl_k_finds_a_key_on_another_layer_and_runs_commands() -> lazykeymap::Result<()> {
+    use lazykeymap::Event;
     let board =
-        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?.layers(2);
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(110, 34));
+        lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?.layers(2);
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(110, 34));
     // Esc on layer 1, then back to layer 0.
     app.handle(Event::Char(']'))?;
     for event in [
@@ -712,23 +717,23 @@ fn ctrl_k_finds_a_key_on_another_layer_and_runs_commands() -> lazyvial::Result<(
 }
 
 #[test]
-fn catalog_endpoints_with_home_and_end() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn catalog_endpoints_with_home_and_end() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 24));
-    app.handle(lazyvial::Event::Confirm)?;
-    app.handle(lazyvial::Event::End)?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 24));
+    app.handle(lazykeymap::Event::Confirm)?;
+    app.handle(lazykeymap::Event::End)?;
     assert!(app.screen().text().contains("> ?"));
-    app.handle(lazyvial::Event::Home)?;
+    app.handle(lazykeymap::Event::Home)?;
     assert!(app.screen().text().contains("> NO"));
     Ok(())
 }
 
 #[test]
-fn corne_draws_four_rows() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
-    let app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(120, 24));
+fn corne_draws_four_rows() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
+    let app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(120, 24));
     let text = app.screen().text();
     assert!(text.contains("selected NO"), "{text}");
     let key_lines: Vec<_> = text
@@ -747,8 +752,8 @@ fn corne_draws_four_rows() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn multi_line_custom_names_stay_on_one_line() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(
+fn multi_line_custom_names_stay_on_one_line() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(
         r#"{
           "name": "bt",
           "matrix": { "rows": 1, "cols": 1 },
@@ -756,9 +761,9 @@ fn multi_line_custom_names_stay_on_one_line() -> lazyvial::Result<()> {
           "layouts": { "keymap": [["0,0"]] }
         }"#,
     )?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     for ch in "/next bt".chars() {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
     let text = app.screen().text();
     assert!(text.contains("> Next BT"), "{text}");

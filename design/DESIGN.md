@@ -1,8 +1,8 @@
-# lazyvial
+# lazykeymap
 
 ## Problem
 
-lazyvial is a terminal program that remaps a plugged-in Vial keyboard. The repo has no application code. The grounding file is the constraint set. A keycode is a `u16`. Matrix keys live in one row-major buffer of `layers * rows * cols` codes, big-endian on the wire. Encoder directions live in a separate get and set under the `0xFE` prefix. Firmware starts locked. A locked board still takes key, encoder, tap dance, and combo writes; it only stores `QK_BOOT` as `KC_NO` and skips macro buffer writes (vial-qmk `vial_keycode_firewall` and `via.c`). The grounding file's "writes while locked do not stick" was wrong. The drawing is the KLE keymap inside the LZMA definition, minus keys the current layout-option dword hides. A board with no definition is a failure, and the program must not invent a grid. Edits are staged in a draft and reach the keyboard on `:w`. Quit asks when the draft has changes, and otherwise leaves the keyboard as last written.
+lazykeymap is a terminal program that remaps a plugged-in Vial keyboard. The repo has no application code. The grounding file is the constraint set. A keycode is a `u16`. Matrix keys live in one row-major buffer of `layers * rows * cols` codes, big-endian on the wire. Encoder directions live in a separate get and set under the `0xFE` prefix. Firmware starts locked. A locked board still takes key, encoder, tap dance, and combo writes; it only stores `QK_BOOT` as `KC_NO` and skips macro buffer writes (vial-qmk `vial_keycode_firewall` and `via.c`). The grounding file's "writes while locked do not stick" was wrong. The drawing is the KLE keymap inside the LZMA definition, minus keys the current layout-option dword hides. A board with no definition is a failure, and the program must not invent a grid. Edits are staged in a draft and reach the keyboard on `:w`. Quit asks when the draft has changes, and otherwise leaves the keyboard as last written.
 
 Tap dance, combo, and macro editing are in, as tabs beside the keymap (see Editors). Lighting, key overrides, alt repeat keys, QMK settings, layout-option edits, keymap import and export, and firmware flashing are out of this tool. The type layout has to make each of those a new private codec plus a new caller, so a later edit cannot grow them by adding a match arm the screen already touches.
 
@@ -11,10 +11,10 @@ Tap dance, combo, and macro editing are in, as tabs beside the keymap (see Edito
 The library call is `App`. The caller passes events and reads the painted string. `attach` opens the only Vial board, or returns a chooser when several answer. `MemoryBoard` is the same `Attached` value with no USB device. `Terminal` belongs to the binary. The library never sees a tty event.
 
 ```rust
-use lazyvial::{App, Step};
+use lazykeymap::{App, Step};
 
-fn main() -> lazyvial::Result<()> {
-    let mut app = App::new(lazyvial::attach()?, Terminal::open()?);
+fn main() -> lazykeymap::Result<()> {
+    let mut app = App::new(lazykeymap::attach()?, Terminal::open()?);
     loop {
         if app.handle(Terminal::event()?)? == Step::Quit {
             return Ok(());
@@ -31,7 +31,7 @@ In search, characters append to the query, including `j`, `k`, and `q`. `?` open
 
 The painted string is the contract. The screen is five bands, top to bottom: the header bar, the main panel, the lower panel when search or a field is open, the status bar, and the options bar.
 
-- The header bar is one filled line: a ` lazyvial ` brand chip, the board name, the tabs (`L0`.. then `Tap Dance`, `Combos`, `Macros`, the active one filled), and at the right `● N unsaved` when the draft differs from the keyboard and `● locked` or `● ready`. On a narrow screen the tabs farthest from the active one drop first, marked `…`. The chooser's header says `choose a keyboard` and has no tabs or state.
+- The header bar is one filled line: a ` lazykeymap ` brand chip, the board name, the tabs (`L0`.. then `Tap Dance`, `Combos`, `Macros`, the active one filled), and at the right `● N unsaved` when the draft differs from the keyboard and `● locked` or `● ready`. On a narrow screen the tabs farthest from the active one drop first, marked `…`. The chooser's header says `choose a keyboard` and has no tabs or state.
 - The chooser shows each board as a two-line card, centered and at most 64 columns wide: the product name with the manufacturer at the right, then `vid:pid · serial` from HID enumeration, so two boards with the same name still differ. The highlighted card is lighter and carries an accent bar `▌`. A board that opens without a Vial layout shows `✕ no Vial layout` in place of the manufacturer and stays on the list.
 - The main panel is a rounded box titled `layer {n}/{count}`, with `n` starting at 0 as QMK counts, or `tap dance 1/4`, `combos 1/2`, `macros 1/4` with the cursor row. The keycaps sit centered in it. During a hold the keys the unlock names are painted amber.
 - Under the keycaps, when the panel has rows to spare, the selected key's details: a rule, then the legend chip, its QMK name when that says more than the legend (`KC_ESCAPE`), the code (`0x0029`), and what it does (`basic key`, `mod-tap: hold for the modifier, tap for the key`, `layer 1 while held`; QMK, the legends, and the tabs all count layers from 0). Then `on each layer  L0 Esc  L1 NO ...`, the same key on every layer with this layer filled and staged ones green, when the board has more than one layer. Then, when this key is staged, `unsaved: the keyboard still has {saved}, :w writes {draft}`. The details take spare rows only, so a short screen or an open search drops them before anything else.
@@ -43,27 +43,27 @@ Rows go to the key lines first, then the status bar, so the unlock prompt surviv
 Search ranking is case-insensitive. A legend or token that starts with the query ranks before a substring. A shorter legend wins a tie. The remaining order is the catalog, tab by tab. `Confirm` assigns the highlighted hit. The fixture below has its first selectable key under the cursor, and a key whose legend is `Hid` with label 8 equal to `0,1`. The default layout-option dword is 0, which selects choice 0 of each group, so `Hid` is omitted.
 
 ```rust
-fn remap_persists() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
+fn remap_persists() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
         .locked(&[(0, 0), (0, 1)]);
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert!(app.screen().text().contains("locked"));
     assert!(app.screen().text().contains("[NO]"));
     assert!(!app.screen().text().contains("Hid"));
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Char('e'))?;
-    app.handle(lazyvial::Event::Char('s'))?;
-    app.handle(lazyvial::Event::Char('c'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('e'))?;
+    app.handle(lazykeymap::Event::Char('s'))?;
+    app.handle(lazykeymap::Event::Char('c'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains("NO → Esc"));
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     for ch in ":w".chars() {
-        app.handle(lazyvial::Event::Char(ch))?;
+        app.handle(lazykeymap::Event::Char(ch))?;
     }
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains("[Esc]"));
     drop(app);
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(60, 16));
     assert!(app.screen().text().contains("[Esc]"));
     Ok(())
 }
@@ -72,20 +72,20 @@ fn remap_persists() -> lazyvial::Result<()> {
 A second `open` while the first `App` still holds the board returns `Error::Busy`. Drop releases it. The second `open` reads the stored codes through the same command codec as the first, so a paint-only cache cannot satisfy the last assertion.
 
 ```rust
-fn pick_when_two() -> lazyvial::Result<()> {
-    let alpha = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
+fn pick_when_two() -> lazykeymap::Result<()> {
+    let alpha = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?
         .named("alpha");
-    let beta = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/other.json"))?
+    let beta = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/other.json"))?
         .named("beta");
-    let mut app = lazyvial::App::new(
-        lazyvial::MemoryBoard::choose(&[alpha, beta])?,
-        lazyvial::TestScreen::new(40, 12),
+    let mut app = lazykeymap::App::new(
+        lazykeymap::MemoryBoard::choose(&[alpha, beta])?,
+        lazykeymap::TestScreen::new(40, 12),
     );
     assert!(app.screen().text().contains("choose"));
     assert!(app.screen().text().contains("> alpha"));
-    app.handle(lazyvial::Event::Char('j'))?;
+    app.handle(lazykeymap::Event::Char('j'))?;
     assert!(app.screen().text().contains("> beta"));
-    app.handle(lazyvial::Event::Confirm)?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains("layer 0/"));
     assert!(app.screen().text().contains("beta"));
     Ok(())
@@ -114,12 +114,12 @@ Key strings are KLE's serialized legends. The default center-front alignment sto
 `tests/fixtures/encoder.json` is one clockwise encoder. Label 4 is `e`. Label 0 is `0,0`. An unlocked board writes that direction on `Confirm` with no `Tick`.
 
 ```rust
-fn encoder_writes_clockwise() -> lazyvial::Result<()> {
-    let board = lazyvial::MemoryBoard::from_definition(include_str!("fixtures/encoder.json"))?;
-    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 8));
-    app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Char('a'))?;
-    app.handle(lazyvial::Event::Confirm)?;
+fn encoder_writes_clockwise() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/encoder.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(40, 8));
+    app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Char('a'))?;
+    app.handle(lazykeymap::Event::Confirm)?;
     assert!(app.screen().text().contains("[A]"));
     Ok(())
 }
@@ -146,6 +146,39 @@ Each editor tab is a sheet: one row per entry, a cursor cell, and a status line 
 The unlock hold is only for the two writes a locked board refuses: a change that contains `QK_BOOT` (keymap, encoder, tap dance, or combo output) and any macro buffer write. That is also when vial-gui asks. `Board::needs_unlock` is that rule; `begin_hold` reads unlock status only then, and starts the hold with `hold {keys} to write {what}` when the board is locked. Everything else writes at once, locked or not. `Cancel` abandons the hold.
 
 The unlock keys are real keys, so holding them types into this terminal (Corne's stock combo is matrix 0,0 + 0,1, Tab and Q). During the hold only Esc acts; `q` and `?` do nothing, and Ctrl-C still quits. vial-qmk counts down from 50, one step per poll that comes more than 100 ms after the last counted one while every unlock key is down, and resets the count on any other poll. The binary therefore ticks every 200 ms on a fixed clock, as Vial's client does, whether or not keys arrive in between; about ten seconds of holding unlocks. Poll byte 2 is that count, drawn as a ten-step bar after the prompt, so an empty bar means the board does not see every key held. Once a poll reports unlocked the write goes out, the screen says `unlocked, let go of the keys`, and every key is dropped until one whole tick passes with none, so the repeats of the held keys never reach the next view.
+
+## ZMK Studio
+
+`vial::zmk::Zmk` is one more `Io`. Like `FakeIo`, it decodes each Vial report into an `Ask` and answers it, here by ZMK Studio RPC: protobuf (zmkfirmware/zmk-studio-messages) in SOF `0xAB` / ESC `0xAC` / EOF `0xAD` frames. `Framed` numbers the requests, cuts the frames, and matches answers; under it a `Link` only moves bytes, and there are two:
+
+- `Serial`, the board's USB CDC port. `enumerate` opens only ports with ZMK's default USB id (`1d50:615e`), a maker naming ZMK, or the one `--port` named (`attach_port`, kept for reconnects), since opening a serial port resets an Arduino or a printer. A port that answers `core.get_device_info` within 300 ms is a board.
+- `Ble`, the Studio GATT characteristic `00000001-0196-6107-c967-c5cfb1c2482a`: writes with response in pieces of MTU − 3 bytes, answers by indication. btleplug finds the paired boards the system is connected to by the service UUID (`retrieve_peripherals`; a 2 s scan where that is unsupported), on one tokio runtime thread. Finding adapters is capped at 1.5 s, because macOS never answers while Bluetooth is off or the terminal may not use it, and all of Bluetooth at 8 s. Studio answers only on the keyboard's active output, so a board typing over USB is found on serial.
+
+Nothing above `Io` knows the keyboard is ZMK, so `Load`, `Board`, the draft, undo, and the screen are shared.
+
+- Before `Load` sends its first report it calls `Io::busy` until it returns `None`; `Zmk` reads one piece per call (lock state, the behavior list, each behavior's details, `keymap.get_keymap`, then `keymap.get_physical_layouts` and the definition) and names the next piece, which the opening card shows. Over Bluetooth this takes seconds, and the screen repaints and takes Esc between pieces. A locked board fails the open with how to unlock (`&studio_unlock`), and Enter on the card starts the read over. The port stays open across that failure. The firmware default (`CONFIG_ZMK_STUDIO_LOCK_ON_DISCONNECT`) locks again when the client disconnects, so the unlock has to happen while this process holds the port; closing the program and opening it again asks for the key once more.
+- A call's wait is how long the keyboard may stay quiet, reset by every arrival, not a cap on the whole reply: a keymap comes over Bluetooth about 20 bytes per indication. Bluetooth writes give up after 3 s. `LAZYKEYMAP_TRACE=file` logs each call.
+- The definition is made here: one KLE row per key of the active physical layout (centi-units and centi-degrees, divided by 100), matrix `1 × keys`, label `0,position`.
+- A binding maps to the QMK keycode that does the same thing, found by the behavior's `display-name` (`Key Press`, `Mod-Tap`, `Layer-Tap`, `Momentary Layer`, ...). Layer parameters are layer ids; QMK's layer number is the layer's index. A keycode stands for a binding only if it maps back to that exact binding. Every other binding on the keymap, then every binding whose parameters are all named values or small ranges (Bluetooth, outputs, lighting, no-parameter behaviors), becomes a `customKeycodes` entry from `0x7E00`, named from the behavior metadata.
+- A query starting with `&` is a binding being put together from that same metadata (`Zmk::complete` / `Zmk::intern`). Known display names use the keymap-file tokens (`Key Press` is `&kp`); the keyboard's own behaviors are slugged. Enter takes the highlighted hit, and once every parameter the behavior reported is filled the binding is staged. A constant Studio names `Select Profile` is the token `SelectProfile`.
+- `Io::speaks` says which keycodes the keyboard can store, and `Load::finish` drops the rest from the key list with `catalog::retain`.
+- `SetKey` sends `keymap.set_layer_binding` and then `keymap.save_changes`, since Vial writes are permanent and Studio's are staged. ZMK saves only changed bindings, so one save per key writes no more flash than one save at the end.
+- Tap dance, combo, macro, and encoder asks are refused; the entry counts are 0, so their tabs never show. Protocol 4 keeps persistent default layer keys out and lets the entry flags carry Caps Word and Key Repeat.
+- Layer names come from Studio (`Io::layer_names`) and show in the tabs (`L1 Sym`) and the panel title. `:layer-add`, `:layer-remove`, `:layer-rename NAME`, `:layer-left`, and `:layer-right` go through `Io::edit_layers` (`LayerOp`): Studio's `add_layer`, `remove_layer`, `set_layer_props`, and `move_layer`, then `save_changes`. They refuse while keys are staged, because the keymap is read again after: `Board::reopen` hands the open link back as a candidate, and the `Open` state reads it and lands on the layer the change was about. A command's argument is whatever follows its name on the `:` line (`command_arg`).
+- `:layout` lists the physical layouts Studio reported (`Io::layouts`); `:layout 1` or `:layout five` calls `set_active_physical_layout`, saves, and reads the keyboard again, the same way a layer change does. A board with one layout, a keymap file, and a Vial board say so.
+
+## ZMK keymap files
+
+`lazykeymap KEYMAP` (`attach_file`) edits a `.keymap` file the way Keymap Editor does. `vial::file::FileIo` is one more `Io`, so the keymap, layers, draft, undo, and screen are the ones above; `:w` writes the file.
+
+- `dts` parses devicetree with byte spans for every node, property, and cell token, skipping comments and preprocessor lines (it keeps `#define`s). Every write is a list of splices (`dts::apply`) on the original text, then a parse of the result, so whatever was not edited stays byte for byte.
+- A binding's text maps to a QMK keycode through the same `zmk::qmk_code` / `zmk::qmk_binding` the Studio backend uses, keyed by behavior label (`kp`, `mt`, `lt`, `mo`, ...) and ZMK key names (`zmk_keys`, generated from `keys.h`). Only a keycode that maps back to the same behavior and parameters stands for a binding; every other binding is a custom keycode named by its own text (`Io::intern`, which adds it to the key list).
+- A query starting with `&` in the key list is a binding being put together. `Io::complete` lists what may come next: behaviors, then each parameter's values, from Keymap Editor's behavior schema for ZMK's own (`file::BEHAVIORS`: key, modifier, layer, command, profile, button) and, for the file's hold-taps and macros, `#binding-cells` with what their `bindings` hold. Enter takes the highlighted hit; once the behavior has every parameter, the binding is staged on the key or the section cell. A folder with several keymaps opens the choose screen with one card each, and `:layer-remove` asks first (`Question::RemoveLayer`).
+- A key write replaces that binding's bytes, padded to the old width; one that no longer fits lays the layer's grid out again (`realign`), keeping each column's start where it can.
+- The layout comes from `<keymap>.json` or `info.json` beside the file (Keymap Editor's and QMK's key list), else from the lines the first layer is written on.
+- Layer changes renumber what points at layers: the first parameter of `mo`, `lt`, `tog`, `to`, `sl` and of hold-taps whose first binding is one of those, combo `layers`, and conditional `if-layers` / `then-layer`. A layer that something still points at is not removed.
+- `sections` models the rest as sheets (`Tab::Section`): Combos, Macros, Behaviors, Conditional, and Encoders. A row is a node; a cell is a property kept as the file's text (`Record`), typed by `Cell` (one binding, `< >` cells, a string, a flag), with an optional ragged list of bindings after the columns. A section changes as one `Write::Section`, like `Write::Macros`; `FileIo::write_section` rewrites only changed properties, removes and adds nodes, sets a macro's `compatible` and `#binding-cells` from its `&macro_param_` bindings, and renames every `&label` use when a behavior or macro is renamed. A behavior or macro still in use is not removed. After a write the file's rows replace both the draft and the saved copy, since new nodes now have places in the file.
+- A `#define` used as a binding expands while editing (`expand_call`): `HRML(A, B, C, D)` is four keys, and an object-like define is the bindings in its body. Editing one of those keys rewrites the invocation as the expanded bindings; leaving them alone keeps the `#define`. Layer changes renumber layer numbers inside one-line define bodies too (`#define NAV &mo 2`); a body continued over lines with `\` is left alone. The layout is not generated from a matrix transform.
 
 ## Find anything
 
@@ -195,7 +228,7 @@ Modules are nested so the compiler keeps it that way, per encode-lessons-in-stru
 
 Opening from the choose screen reads one report per `Load::step`. Each `Tick` reads for about 60 ms, then returns `Step::Working`; the binary sends the next `Tick` at once, still taking keys between slices. Over Bluetooth a report takes tens of milliseconds and a 4-layer board with tap dances and combos takes about five seconds, so the open card shows a progress bar, the part being read (`keymap 14/40`), and `esc stops`. Esc returns to the list. A board that fails to open stays on the list with the reason on its card; a board that stops answering, as a sleeping Bluetooth board does, says `no answer: wake it, then enter`. The percentage never steps back as counts are learned.
 
-The board opens once the keymap, encoders, and lock state are in (`Load::ready`); on a Bluetooth Cornix that is about 3 of the 5 seconds. The tap dances, combos, and macro buffer follow in `Board::read_rest`, one slice per `Tick`, while the keymap is usable. The header shows `◌ reading tap dances` meanwhile, without a count, so the screen repaints only when the part changes: a repaint between reports is a gap, and over Bluetooth a gap makes the next report take about half a second. Their tabs appear at once from the counts the read already has (`Board::editors`), marked `Tap Dance…` until all three are read. An unread tab shows a `reading` panel instead of its sheet: `lazyvial is still reading this keyboard`, `◌ now {part}`, again without a count, and that the keymap works meanwhile. Its keys are `keys::View::Reading`: tabs, help, quit, undo, and the command line, so no edit key reaches a list that is not there yet. Once read, the tab becomes its sheet in place, and the saved copies arrive equal to the draft, so nothing looks unsaved. Background reads pause during an unlock hold and a save, whose ticks belong to them.
+The board opens once the keymap, encoders, and lock state are in (`Load::ready`); on a Bluetooth Cornix that is about 3 of the 5 seconds. The tap dances, combos, and macro buffer follow in `Board::read_rest`, one slice per `Tick`, while the keymap is usable. The header shows `◌ reading tap dances` meanwhile, without a count, so the screen repaints only when the part changes: a repaint between reports is a gap, and over Bluetooth a gap makes the next report take about half a second. Their tabs appear at once from the counts the read already has (`Board::editors`), marked `Tap Dance…` until all three are read. An unread tab shows a `reading` panel instead of its sheet: `lazykeymap is still reading this keyboard`, `◌ now {part}`, again without a count, and that the keymap works meanwhile. Its keys are `keys::View::Reading`: tabs, help, quit, undo, and the command line, so no edit key reaches a list that is not there yet. Once read, the tab becomes its sheet in place, and the saved copies arrive equal to the draft, so nothing looks unsaved. Background reads pause during an unlock hold and a save, whose ticks belong to them.
 
 A report that fails after the board is open (a save, an unlock poll, or the background read) no longer quits. The board stays on screen with its draft, under a `keyboard disconnected` popup with a pick-one list (`j`/`k`, Enter): reconnect and keep the unsaved changes, reconnect and revert them, start again from the keyboard list, or quit. Without unsaved changes it is reconnect, start again, or quit. `q` quits at once, since the list already says what quitting drops. Reconnecting first closes the old device (`Board::disown`): a HID device still held does not enumerate again. It then looks for the same keyboard by name, maker, USB id, and serial; a keyboard not back yet says `not back yet: wake the keyboard or plug it in, then try again` and the list stays. Found, it reads the board again with progress in the popup, and Esc stops that. Keeping the changes waits for the tap dances, combos, and macros too, then stages every old unsaved change on the fresh board, so `:w` writes them; the layer and selected key carry over. `MemoryBoard::unplug` and `plug` make the fake device stop and start answering.
 

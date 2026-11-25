@@ -10,7 +10,16 @@ mod keycodes;
 pub(super) use catalog::{Listed, Range};
 pub(super) use entries::{Action, Combo, Spot, Tab, TapDance, MAX_DELAY};
 pub(super) use layout::{search_across, Lower, Mode, ModeTone, Popup, PopupLine};
+mod dts;
+mod file;
 mod layout;
+mod sections;
+mod zmk;
+mod zmk_keys;
+pub(super) use file::candidates as file_candidates;
+pub(super) use sections::{slot as section_slot, width as section_width};
+pub(super) use sections::{Cell, Kind, Record, Slot};
+pub(super) use zmk::add_port;
 
 use catalog::{Features, Table};
 use layout::{Cap, Definition, SheetCell, Tone};
@@ -18,6 +27,88 @@ use layout::{Cap, Definition, SheetCell, Tone};
 /// 32-byte message, without the HID report id.
 trait Io {
     fn exchange(&mut self, report: &[u8; 32]) -> Result<[u8; 32]>;
+
+    /// Whether this keyboard can store `code`. The key list offers only those.
+    fn speaks(&self, _code: u16) -> bool {
+        true
+    }
+
+    /// Reading the keyboard needs before it answers reports, one piece per call, so the
+    /// screen can repaint and show `what` comes next in between. `None` once it can answer.
+    fn busy(&mut self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Each layer's name, in layer order, where the keyboard names them. Vial does not.
+    fn layer_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The text a keycode is written as in a keymap file. Only a keymap file has one.
+    fn binding_text(&self, _code: u16) -> Option<String> {
+        None
+    }
+
+    /// A keymap file's sections, in tab order. Only a keymap file has them.
+    fn sections(&self) -> Vec<(Kind, Vec<Record>)> {
+        Vec::new()
+    }
+
+    /// Rewrites one section to match `rows`, and returns it as the file now has it.
+    fn write_section(&mut self, _kind: Kind, _rows: &[Record]) -> Result<Vec<Record>> {
+        Err(Error::Protocol("only a keymap file has these"))
+    }
+
+    /// Adds, removes, renames, or moves a layer and keeps it. The board is read again after.
+    fn edit_layers(&mut self, _op: &LayerOp) -> Result<()> {
+        Err(Error::Protocol("this keyboard's layers are fixed"))
+    }
+
+    /// Physical layout names, in Studio's order. Empty on a Vial board or a keymap file.
+    fn layouts(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Which physical layout is active. Meaningful when `layouts` is not empty.
+    fn layout_at(&self) -> usize {
+        0
+    }
+
+    /// Switches the physical layout and keeps it. The board is read again after.
+    fn set_layout(&mut self, _index: usize) -> Result<()> {
+        Err(Error::Protocol("this keyboard has one layout"))
+    }
+
+    /// The keycode for a binding typed as text, as `&thm LSHIFT B`, and its key-list name when
+    /// it is new. Only a keymap file takes typed bindings.
+    fn intern(&mut self, _text: &str) -> Option<(u16, String)> {
+        None
+    }
+
+    /// Where `:w` puts the changes, for the notice after it.
+    fn writes_to(&self) -> &'static str {
+        "the keyboard"
+    }
+
+    /// For a binding being typed after `&`: a title, the hits that may come next (each the
+    /// token and what it is), and whether the text has every parameter already. A keymap file
+    /// knows behaviors by name; a Studio board uses the behavior list it reported.
+    fn complete(&self, _typed: &str) -> Option<file::Completion> {
+        None
+    }
+}
+
+/// One change to the layer list. Indexes count from 0, as the tabs do.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(in crate::session) enum LayerOp {
+    /// A new layer after the last.
+    Add,
+    Remove(u8),
+    Rename(u8, String),
+    Move {
+        from: u8,
+        to: u8,
+    },
 }
 
 /// Prepends `0x00` on the write and strips nothing from the 32-byte read.
@@ -447,7 +538,8 @@ pub(super) struct Listing {
     pub(super) serial: String,
 }
 
-/// Skip non-Vial HID devices. Do not read the definition here.
+/// Vial boards over HID, then ZMK Studio boards over USB serial. Skip every other device.
+/// Do not read the definition here.
 pub(super) fn enumerate() -> Result<Vec<Candidate>> {
     let api = hidapi::HidApi::new().map_err(|_| Error::Disconnected)?;
     let mut found = Vec::new();
@@ -480,6 +572,7 @@ pub(super) fn enumerate() -> Result<Vec<Candidate>> {
             guard: None,
         });
     }
+    found.extend(zmk::enumerate());
     Ok(found)
 }
 
@@ -522,6 +615,8 @@ pub(super) struct Load {
     encoders: Vec<Vec<(u16, u16)>>,
     unlocked: bool,
     entries: Entries,
+    /// What the keyboard is reading before it answers, from `Io::busy`.
+    waiting: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -579,6 +674,7 @@ impl Load {
             encoders: Vec::new(),
             unlocked: false,
             entries: Entries::default(),
+            waiting: None,
         })
     }
 
@@ -602,6 +698,10 @@ impl Load {
     }
 
     fn advance(&mut self, io: &mut dyn Io) -> Result<()> {
+        self.waiting = io.busy()?;
+        if self.waiting.is_some() {
+            return Ok(());
+        }
         self.phase = self.read(io)?;
         self.done += 1;
         // Each count is learned on the way, so the total grows early on. Hold the bar where it
@@ -666,7 +766,7 @@ impl Load {
             Phase::Done => "done".to_string(),
         };
         Progress {
-            what,
+            what: self.waiting.clone().unwrap_or(what),
             percent: self.percent,
         }
     }
@@ -924,16 +1024,22 @@ impl Load {
             combos: Vec::new(),
             macros: Vec::new(),
         };
+        let io = candidate.io.take().expect("a ready load keeps its io");
+        let catalog = catalog::merge(
+            &def.custom,
+            self.tap_dance,
+            self.macros,
+            def.midi,
+            self.layers,
+            self.features,
+        );
         let mut board = Board {
             listing: (*candidate.listing).clone(),
-            catalog: catalog::merge(
-                &def.custom,
-                self.tap_dance,
-                self.macros,
-                def.midi,
-                self.layers,
-                self.features,
-            ),
+            catalog: catalog::retain(catalog, |code| io.speaks(code)),
+            names: io.layer_names(),
+            sections: io.sections(),
+            saved_sections: Vec::new(),
+            codes: std::collections::HashMap::new(),
             def,
             keymap,
             options: self.options,
@@ -943,11 +1049,13 @@ impl Load {
             entries: Entries::default(),
             saved,
             undo: Vec::new(),
-            io: candidate.io.take().expect("a ready load keeps its io"),
+            io,
             rest: Some(self),
             fake: guard.clone(),
             _guard: guard,
         };
+        board.saved_sections.clone_from(&board.sections);
+        board.learn_codes();
         board.settle();
         board
     }
@@ -987,6 +1095,13 @@ pub(super) struct Board {
     _guard: Option<Arc<RefCell<Store>>>,
     /// The fake device behind this board, so `find_again` can find it after `disown`.
     fake: Option<Arc<RefCell<Store>>>,
+    /// Layer names, where the keyboard has them. Empty for Vial.
+    names: Vec<String>,
+    /// A keymap file's sections: the draft, then what the file holds.
+    sections: Vec<(Kind, Vec<Record>)>,
+    saved_sections: Vec<(Kind, Vec<Record>)>,
+    /// The keycode each binding text in the sections shows as, for legends.
+    codes: std::collections::HashMap<String, u16>,
 }
 
 impl Drop for Board {
@@ -1028,6 +1143,166 @@ impl Board {
         if let Some(store) = self._guard.take() {
             store.borrow_mut().open = false;
         }
+    }
+
+    /// Changes the layer list on the keyboard. The draft must be written first: the keymap is
+    /// read again after, and staged keys would land on the wrong layers.
+    pub(super) fn edit_layers(&mut self, op: &LayerOp) -> Result<()> {
+        if !self.pending().is_empty() {
+            return Err(Error::Protocol(
+                "write or discard the changes first (:w or :e!)",
+            ));
+        }
+        self.io.edit_layers(op)
+    }
+
+    pub(super) fn layouts(&self) -> Vec<String> {
+        self.io.layouts()
+    }
+
+    pub(super) fn layout_at(&self) -> usize {
+        self.io.layout_at()
+    }
+
+    /// Switches the physical layout. The draft must be written first: the keymap is read again
+    /// after, and a different layout has different key positions.
+    pub(super) fn set_layout(&mut self, index: usize) -> Result<()> {
+        if !self.pending().is_empty() {
+            return Err(Error::Protocol(
+                "write or discard the changes first (:w or :e!)",
+            ));
+        }
+        self.io.set_layout(index)
+    }
+
+    /// This keyboard as a candidate to read again, still open. The board is left with nothing.
+    pub(super) fn reopen(mut self) -> Candidate {
+        Candidate {
+            listing: Box::new(self.listing.clone()),
+            io: Some(std::mem::replace(&mut self.io, Box::new(Closed))),
+            guard: self
+                ._guard
+                .take()
+                .inspect(|store| store.borrow_mut().open = false),
+        }
+    }
+
+    /// The keycode for a typed binding, added to the key list when it is new. `None` when this
+    /// keyboard does not take typed bindings or the text is not one.
+    pub(super) fn intern(&mut self, text: &str) -> Option<u16> {
+        let (code, name) = self.io.intern(text)?;
+        if !name.is_empty() {
+            catalog::add_custom(&mut self.catalog, code, &name);
+        }
+        self.codes.insert(text.to_string(), code);
+        Some(code)
+    }
+
+    /// The rows of a keymap-file section, as drafted.
+    pub(super) fn section(&self, kind: Kind) -> &[Record] {
+        section_of(&self.sections, kind)
+    }
+
+    /// The text a picked keycode is written as in a keymap file.
+    pub(super) fn binding_text(&self, code: u16) -> Option<String> {
+        self.io.binding_text(code)
+    }
+
+    /// Learns the keycode of every binding in the sections, so they show as key legends.
+    fn learn_codes(&mut self) {
+        let texts: Vec<String> = self
+            .sections
+            .iter()
+            .flat_map(|(kind, rows)| rows.iter().flat_map(|row| row_bindings(*kind, row)))
+            .collect();
+        for text in texts {
+            if !self.codes.contains_key(&text) {
+                self.intern(&text);
+            }
+        }
+    }
+
+    /// A section cell as the sheet shows it: a binding as its key's legend, other text as is.
+    fn text_cell(&self, text: &str, binding: bool, changed: bool) -> SheetCell {
+        let (text, tone) = match (binding, self.codes.get(text)) {
+            (true, Some(code)) => (self.legend(*code), catalog::tone(*code)),
+            (true, None) => (text.trim_start_matches('&').to_string(), Tone::Raw),
+            (false, _) if text.is_empty() => ("·".to_string(), Tone::None),
+            (false, _) => (text.to_string(), Tone::Key),
+        };
+        SheetCell {
+            text,
+            tone,
+            changed,
+            preview: false,
+        }
+    }
+
+    fn section_sheet(&self, kind: Kind) -> (Vec<&'static str>, Vec<(String, Vec<SheetCell>)>) {
+        let saved = section_of(&self.saved_sections, kind);
+        let rows: Vec<(String, Vec<SheetCell>)> = self
+            .section(kind)
+            .iter()
+            .map(|row| {
+                let was = saved
+                    .iter()
+                    .find(|old| row.id.is_some() && old.id == row.id);
+                let mut cells = vec![SheetCell {
+                    text: row.name.clone(),
+                    tone: Tone::Key,
+                    changed: was.is_none_or(|old| old.name != row.name),
+                    preview: false,
+                }];
+                for (index, column) in kind.columns().iter().enumerate() {
+                    let changed = was.is_none_or(|old| old.cells[index] != row.cells[index]);
+                    let mut cell =
+                        self.text_cell(&row.cells[index], column.cell == Cell::Binding, changed);
+                    if column.cell == Cell::Flag && !row.cells[index].is_empty() {
+                        cell.text = "yes".to_string();
+                    }
+                    cells.push(cell);
+                }
+                if kind.tail().is_some() {
+                    let changed = was.is_none_or(|old| old.tail != row.tail);
+                    cells.extend(
+                        row.tail
+                            .iter()
+                            .map(|text| self.text_cell(text, true, changed)),
+                    );
+                    cells.push(SheetCell {
+                        text: "+".to_string(),
+                        tone: Tone::Trans,
+                        changed: false,
+                        preview: false,
+                    });
+                }
+                // The name is the first column; a label beside it would say it twice.
+                (String::new(), cells)
+            })
+            .collect();
+        let widest = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
+        let mut header: Vec<&'static str> = vec!["name"];
+        header.extend(kind.columns().iter().map(|column| column.name));
+        if let Some(tail) = kind.tail() {
+            header.push(tail);
+        }
+        while header.len() < widest {
+            header.push("");
+        }
+        (header, rows)
+    }
+
+    /// Where `:w` puts the changes: the keyboard, or the keymap file.
+    pub(super) fn writes_to(&self) -> &'static str {
+        self.io.writes_to()
+    }
+
+    /// The layer's name, where the keyboard has one.
+    pub(super) fn layer_name(&self, layer: u8) -> Option<&str> {
+        self.names
+            .get(usize::from(layer))
+            .map(String::as_str)
+            .filter(|name| !name.is_empty())
     }
 
     /// One more report of the entries still unread. `true` once there is nothing left to read.
@@ -1645,6 +1920,8 @@ pub(in crate::session) enum Write {
     },
     /// Every macro. The buffer is one blob, so a change to one macro rewrites the rest in place.
     Macros(Vec<Vec<Action>>),
+    /// Every row of one keymap-file section, as `Macros` is every macro.
+    Section(Kind, Vec<Record>),
 }
 
 impl Write {
@@ -1661,6 +1938,7 @@ impl Write {
                     Action::Text(_) | Action::Delay(_) => None,
                 })
                 .collect(),
+            Write::Section(..) => Vec::new(),
         }
     }
 }
@@ -1709,6 +1987,9 @@ impl Board {
                 self.saved.combos.get(usize::from(*index)) == Some(entry)
             }
             Write::Macros(macros) => self.saved.macros == *macros,
+            Write::Section(kind, rows) => {
+                section_of(&self.saved_sections, *kind) == rows.as_slice()
+            }
         };
         if same {
             return Ok(Commit::Same);
@@ -1741,6 +2022,19 @@ impl Board {
                 self.saved.combos[usize::from(*index)] = *entry;
             }
             Write::Macros(macros) => self.commit_macros(macros)?,
+            Write::Section(kind, rows) => {
+                // The file numbers its nodes again, so the draft takes the fresh rows and
+                // older undo steps for this section no longer apply.
+                let fresh = self.io.write_section(*kind, rows)?;
+                for list in [&mut self.sections, &mut self.saved_sections] {
+                    if let Some(entry) = list.iter_mut().find(|(k, _)| k == kind) {
+                        entry.1.clone_from(&fresh);
+                    }
+                }
+                self.undo
+                    .retain(|step| !matches!(step, Write::Section(k, _) if k == kind));
+                self.learn_codes();
+            }
         }
         Ok(Commit::Stored)
     }
@@ -1827,6 +2121,7 @@ impl Board {
             Write::TapDance { index, .. } => (0, format!("TD({index})")),
             Write::Combo { index, .. } => (0, format!("combo {index}")),
             Write::Macros(_) => (0, "the macros".to_string()),
+            Write::Section(kind, _) => (0, kind.name().to_lowercase()),
         };
         let keys = self.hold_names(layer, pairs);
         if keys.is_empty() {
@@ -1931,6 +2226,7 @@ impl Board {
         ]
         .into_iter()
         .filter_map(|(shown, tab)| shown.then_some(tab))
+        .chain(self.sections.iter().map(|(kind, _)| Tab::Section(*kind)))
         .collect()
     }
 
@@ -1971,8 +2267,36 @@ impl Board {
         format!("{row},{col}")
     }
 
+    /// The key list's hits. A query that starts with `&` on a keymap file is a binding being
+    /// typed: its hits are what may come next, a behavior or a parameter value.
     pub(super) fn list(&self, range: catalog::Range<'_>) -> catalog::Listed {
+        if let catalog::Range::Find(typed) = range {
+            if let Some((title, hits, _)) = typed
+                .starts_with('&')
+                .then(|| self.io.complete(typed))
+                .flatten()
+            {
+                return catalog::Listed {
+                    title,
+                    hits: hits
+                        .into_iter()
+                        .map(|(legend, token)| catalog::Found {
+                            code: 0,
+                            legend,
+                            token,
+                            masked: false,
+                        })
+                        .collect(),
+                };
+            }
+        }
         catalog::list(&self.catalog, range)
+    }
+
+    /// Whether a typed binding has every parameter its behavior takes; `None` where bindings
+    /// cannot be typed.
+    pub(super) fn typed_complete(&self, typed: &str) -> Option<bool> {
+        self.io.complete(typed).map(|(_, _, complete)| complete)
     }
 
     pub(super) fn shelf_count(&self) -> usize {
@@ -2112,6 +2436,7 @@ impl Board {
         layout::render_board(
             paint.layer,
             self.layer_count(),
+            self.layer_name(paint.layer),
             &caps,
             detail.as_ref(),
             frame,
@@ -2145,7 +2470,12 @@ impl Board {
     fn frame<'a>(&self, paint: &Paint<'a>) -> layout::Frame<'a> {
         let editors = self.editors();
         let layers = usize::from(self.layer_count());
-        let mut tabs: Vec<String> = (0..layers).map(|n| format!("L{n}")).collect();
+        let mut tabs: Vec<String> = (0..self.layer_count())
+            .map(|n| match self.layer_name(n) {
+                Some(name) => format!("L{n} {name}"),
+                None => format!("L{n}"),
+            })
+            .collect();
         // An editor still being read is marked, as `Combos…`.
         let unread = if self.rest.is_some() { "…" } else { "" };
         tabs.extend(editors.iter().map(|tab| format!("{}{unread}", tab.name())));
@@ -2257,6 +2587,7 @@ impl Board {
                     })
                     .collect(),
             ),
+            Tab::Section(kind) => self.section_sheet(kind),
         };
         let title = format!(
             "{} {}/{}",
@@ -2337,6 +2668,24 @@ impl Board {
         let Some((label, cells)) = rows.get(spot.row) else {
             return String::new();
         };
+        if let Tab::Section(kind) = spot.tab {
+            let Some(row) = self.section(kind).get(spot.row) else {
+                return String::new();
+            };
+            let (field, value) = match sections::slot(kind, row, spot.col) {
+                Slot::Name => ("name", row.name.as_str()),
+                Slot::Column(index) => (kind.columns()[index].name, row.cells[index].as_str()),
+                Slot::Tail(index) => ("binding", row.tail[index].as_str()),
+                Slot::Append => {
+                    return format!(
+                        "{}: enter or t adds a binding, & then text types one",
+                        row.name
+                    )
+                }
+            };
+            let value = if value.is_empty() { "(none)" } else { value };
+            return format!("{} {field}: {value}", row.name);
+        }
         if spot.tab != Tab::Macros {
             let field = header.get(spot.col).copied().unwrap_or("");
             let value = cells.get(spot.col).map_or("", |cell| cell.text.as_str());
@@ -2422,6 +2771,7 @@ impl Board {
         self.entries.tap_dances.clone_from(&self.saved.tap_dances);
         self.entries.combos.clone_from(&self.saved.combos);
         self.entries.macros.clone_from(&self.saved.macros);
+        self.sections.clone_from(&self.saved_sections);
         self.undo.clear();
     }
 
@@ -2502,6 +2852,11 @@ impl Board {
         if self.entries.macros != self.saved.macros {
             out.push(Write::Macros(self.entries.macros.clone()));
         }
+        for (kind, rows) in &self.sections {
+            if section_of(&self.saved_sections, *kind) != rows.as_slice() {
+                out.push(Write::Section(*kind, rows.clone()));
+            }
+        }
         out
     }
 
@@ -2522,6 +2877,7 @@ impl Board {
                 entry: self.entries.combos[usize::from(*index)],
             },
             Write::Macros(_) => Write::Macros(self.entries.macros.clone()),
+            Write::Section(kind, _) => Write::Section(*kind, self.section(*kind).to_vec()),
         }
     }
 
@@ -2554,6 +2910,11 @@ impl Board {
             }
             Write::Combo { index, entry } => self.entries.combos[usize::from(*index)] = *entry,
             Write::Macros(macros) => self.entries.macros.clone_from(macros),
+            Write::Section(kind, rows) => {
+                if let Some(entry) = self.sections.iter_mut().find(|(k, _)| k == kind) {
+                    entry.1.clone_from(rows);
+                }
+            }
         }
     }
 
@@ -2645,6 +3006,40 @@ impl Board {
                         ]
                     })
                     .collect()
+            }
+            Write::Section(kind, rows) => {
+                let list = if from_saved {
+                    section_of(&self.saved_sections, *kind)
+                } else {
+                    self.section(*kind)
+                };
+                let mut lines = Vec::new();
+                for row in rows {
+                    match list.iter().find(|old| row.id.is_some() && old.id == row.id) {
+                        Some(old) if old == row => {}
+                        Some(old) => {
+                            lines.push(PopupLine::Heading(row.name.clone()));
+                            for (index, column) in kind.columns().iter().enumerate() {
+                                if old.cells[index] != row.cells[index] {
+                                    lines.push(change(
+                                        format!("{}  {}", column.name, old.cells[index]),
+                                        row.cells[index].clone(),
+                                    ));
+                                }
+                            }
+                            if old.tail != row.tail {
+                                lines.push(change(old.tail.join(" "), row.tail.join(" ")));
+                            }
+                        }
+                        None => lines.push(PopupLine::Heading(format!("new: {}", row.name))),
+                    }
+                }
+                for old in list {
+                    if !rows.iter().any(|row| row.id.is_some() && row.id == old.id) {
+                        lines.push(PopupLine::Heading(format!("removed: {}", old.name)));
+                    }
+                }
+                lines
             }
         }
     }
@@ -2774,6 +3169,24 @@ pub(super) fn pick_text(
     )
 }
 
+/// One section's rows in a list of sections; none when the list does not have it.
+fn section_of(list: &[(Kind, Vec<Record>)], kind: Kind) -> &[Record] {
+    list.iter()
+        .find(|(k, _)| *k == kind)
+        .map_or(&[], |(_, rows)| rows.as_slice())
+}
+
+/// Every binding text a row holds: its binding cells, then its tail.
+fn row_bindings(kind: Kind, row: &Record) -> Vec<String> {
+    kind.columns()
+        .iter()
+        .zip(&row.cells)
+        .filter(|(column, text)| column.cell == Cell::Binding && !text.is_empty())
+        .map(|(_, text)| text.clone())
+        .chain(row.tail.iter().cloned())
+        .collect()
+}
+
 fn exchange(io: &mut dyn Io, ask: &Ask) -> Result<Reply> {
     let resp = io.exchange(&encode(ask))?;
     decode(ask, &resp)
@@ -2868,6 +3281,7 @@ mod tests {
                 candidates,
                 cursor: 0,
                 load,
+                land: 0,
             },
             notice: None,
         };
