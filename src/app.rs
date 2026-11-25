@@ -71,7 +71,7 @@ impl<S: Screen> App<S> {
     }
 
     pub fn handle(&mut self, event: Event) -> Result<Step> {
-        let step = self.model.handle(event)?;
+        let step = self.model.handle(event, self.screen.cols())?;
         self.paint();
         Ok(step)
     }

@@ -7,17 +7,19 @@ pub(super) enum View {
     Map,
     /// A tap dance, combo, or macro tab.
     Sheet,
+    /// An editor tab whose entries are still being read: no cells to move to or edit yet.
+    Reading,
     Search,
     /// A text or number field on a sheet.
     Edit,
     /// A yes-or-no question.
     Ask,
-    /// The `:` command line.
-    Command,
     Hold,
     Help,
     /// The keyboard stopped answering: reconnect, revert, start again, or quit.
     Lost,
+    /// Ctrl-K: one list of commands, places, and keys, filtered as you type.
+    Palette,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,7 +51,7 @@ pub(super) enum Act {
     Insert(Step),
     Reorder(i8),
     Undo,
-    /// Open the `:` command line.
+    /// `:` or `;`: the find-anything list, opened at `:` so it lists the commands.
     Command,
     Confirm,
     Cancel,
@@ -60,6 +62,8 @@ pub(super) enum Act {
     Tick,
     Ignore,
     Shelf(i8),
+    /// Open the Ctrl-K list.
+    Palette,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -80,6 +84,7 @@ enum Key {
     Tab,
     BackTab,
     Char(char),
+    Palette,
 }
 
 struct Row {
@@ -341,6 +346,62 @@ const ROWS: &[Row] = &[
         show: false,
     },
     Row {
+        view: View::Reading,
+        key: Key::Tab,
+        act: Act::Tab(1),
+        name: "tab",
+        label: "tabs",
+        show: true,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::BackTab,
+        act: Act::Tab(-1),
+        name: "shift-tab",
+        label: "tabs",
+        show: false,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Char('?'),
+        act: Act::Help,
+        name: "?",
+        label: "help",
+        show: true,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Char('q'),
+        act: Act::Quit,
+        name: "q",
+        label: "quit",
+        show: true,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Char('u'),
+        act: Act::Undo,
+        name: "u",
+        label: "undo",
+        show: true,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Char(':'),
+        act: Act::Command,
+        name: ":",
+        label: "command",
+        show: true,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Char(';'),
+        act: Act::Command,
+        name: ";",
+        label: "command",
+        show: false,
+    },
+    Row {
         view: View::Ask,
         key: Key::Confirm,
         act: Act::Confirm,
@@ -358,28 +419,20 @@ const ROWS: &[Row] = &[
         show: false,
     },
     Row {
-        view: View::Command,
-        key: Key::Confirm,
-        act: Act::Confirm,
-        name: "enter",
-        label: "run",
-        show: true,
+        view: View::Palette,
+        key: Key::Tab,
+        act: Act::Tab(1),
+        name: "tab",
+        label: "complete a command",
+        show: false,
     },
     Row {
-        view: View::Command,
-        key: Key::Backspace,
-        act: Act::Backspace,
-        name: "bspc",
-        label: "delete",
-        show: true,
-    },
-    Row {
-        view: View::Command,
-        key: Key::Cancel,
-        act: Act::Cancel,
-        name: "esc",
-        label: "cancel",
-        show: true,
+        view: View::Palette,
+        key: Key::BackTab,
+        act: Act::Tab(-1),
+        name: "shift-tab",
+        label: "complete a command",
+        show: false,
     },
     Row {
         view: View::Edit,
@@ -816,18 +869,18 @@ const ROWS: &[Row] = &[
     Row {
         view: View::Search,
         key: Key::Left,
-        act: Act::Shelf(-1),
-        name: "left",
-        label: "group",
+        act: Act::Nudge(Dir::Left),
+        name: "←→↑↓",
+        label: "move",
         show: true,
     },
     Row {
         view: View::Search,
         key: Key::Right,
-        act: Act::Shelf(1),
+        act: Act::Nudge(Dir::Right),
         name: "right",
-        label: "group",
-        show: true,
+        label: "move",
+        show: false,
     },
     Row {
         view: View::Search,
@@ -897,7 +950,8 @@ const ROWS: &[Row] = &[
         view: View::Search,
         key: Key::Cancel,
         act: Act::Cancel,
-        name: "esc",
+        // Ctrl-[ is Esc in every terminal, for a keyboard that has no Esc key.
+        name: "esc/ctrl-[",
         label: "close",
         show: true,
     },
@@ -1023,6 +1077,102 @@ const ROWS: &[Row] = &[
         label: "close",
         show: true,
     },
+    Row {
+        view: View::Map,
+        key: Key::Char(' '),
+        act: Act::Palette,
+        name: "space",
+        label: "find anything",
+        show: true,
+    },
+    Row {
+        view: View::Map,
+        key: Key::Palette,
+        act: Act::Palette,
+        name: "ctrl-k",
+        label: "find anything",
+        show: false,
+    },
+    Row {
+        view: View::Sheet,
+        key: Key::Char(' '),
+        act: Act::Palette,
+        name: "space",
+        label: "find anything",
+        show: true,
+    },
+    Row {
+        view: View::Sheet,
+        key: Key::Palette,
+        act: Act::Palette,
+        name: "ctrl-k",
+        label: "find anything",
+        show: false,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Char(' '),
+        act: Act::Palette,
+        name: "space",
+        label: "find anything",
+        show: true,
+    },
+    Row {
+        view: View::Reading,
+        key: Key::Palette,
+        act: Act::Palette,
+        name: "ctrl-k",
+        label: "find anything",
+        show: false,
+    },
+    Row {
+        view: View::Palette,
+        key: Key::Up,
+        act: Act::Nudge(Dir::Up),
+        name: "up",
+        label: "move",
+        show: false,
+    },
+    Row {
+        view: View::Palette,
+        key: Key::Down,
+        act: Act::Nudge(Dir::Down),
+        name: "down",
+        label: "move",
+        show: false,
+    },
+    Row {
+        view: View::Palette,
+        key: Key::Confirm,
+        act: Act::Confirm,
+        name: "enter",
+        label: "go",
+        show: false,
+    },
+    Row {
+        view: View::Palette,
+        key: Key::Backspace,
+        act: Act::Backspace,
+        name: "backspace",
+        label: "delete",
+        show: false,
+    },
+    Row {
+        view: View::Palette,
+        key: Key::Cancel,
+        act: Act::Cancel,
+        name: "esc",
+        label: "close",
+        show: false,
+    },
+    Row {
+        view: View::Palette,
+        key: Key::Palette,
+        act: Act::Cancel,
+        name: "ctrl-k",
+        label: "close",
+        show: false,
+    },
 ];
 
 fn key_of(event: &Event) -> Option<Key> {
@@ -1043,6 +1193,7 @@ fn key_of(event: &Event) -> Option<Key> {
         Event::Tab => Key::Tab,
         Event::BackTab => Key::BackTab,
         Event::Char(ch) => Key::Char(*ch),
+        Event::Palette => Key::Palette,
         Event::Tick | Event::Quit => return None,
     })
 }
@@ -1060,7 +1211,7 @@ pub(super) fn act(view: View, event: &Event) -> Act {
         }
     }
     if let Key::Char(ch) = key {
-        if matches!(view, View::Search | View::Edit | View::Ask | View::Command) {
+        if matches!(view, View::Search | View::Edit | View::Ask | View::Palette) {
             return Act::Type(ch);
         }
     }
@@ -1093,7 +1244,7 @@ pub(super) fn cheatsheet(current: View) -> Vec<PopupLine> {
         View::Sheet,
         View::Edit,
         View::Ask,
-        View::Command,
+        View::Palette,
         View::Lost,
     ];
     let mut lines = vec![PopupLine::Text(
@@ -1125,10 +1276,11 @@ fn title(view: View) -> &'static str {
         View::Hold => "hold",
         View::Help => "help",
         View::Sheet => "tap dance, combos, macros",
+        View::Reading => "still reading",
         View::Edit => "field",
         View::Ask => "confirm",
-        View::Command => "command line",
         View::Lost => "disconnected",
+        View::Palette => "find anything",
     }
 }
 

@@ -28,6 +28,8 @@ pub enum Event {
     /// One unlock poll. The binary's timer produces this. A person does not.
     Tick,
     Quit,
+    /// Ctrl-K: find anything. Space does the same on the board and the editor tabs.
+    Palette,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -128,11 +130,14 @@ enum ModelKind {
         back: Option<vial::Spot>,
         question: Question,
     },
-    /// `:` or `;`, then a command and Enter.
-    Command {
+    /// Space or Ctrl-K: commands, layers, tabs, and every key on the board, filtered by `text`.
+    /// `:` opens it with `text` = `:`, and a leading `:` lists only the commands, by name.
+    Palette {
         session: Session<Mapping>,
         back: Option<vial::Spot>,
         text: String,
+        /// The row ↑↓ chose. Typing clears it; `palette_pick` says which row Enter runs.
+        cursor: Option<usize>,
     },
     Help {
         under: Box<ModelKind>,
@@ -141,13 +146,6 @@ enum ModelKind {
 }
 
 enum Question {
-    /// A picked keycode. Yes stages it; the keyboard gets it on `:w`.
-    Change {
-        write: vial::Write,
-        /// Where the sheet cursor lands after a yes.
-        after: Option<vial::Spot>,
-        lines: Vec<vial::PopupLine>,
-    },
     /// Unsaved changes, and a quit.
     Quit {
         count: usize,
@@ -170,13 +168,6 @@ impl Question {
             Vec<_>,
             bool,
         ) = match self {
-            Question::Change { lines, .. } => (
-                "stage this change?".to_string(),
-                None,
-                lines,
-                vec![("enter", "stage"), ("esc", "cancel")],
-                false,
-            ),
             Question::Quit { count, lines } => (
                 format!("{count} unsaved change{}", plural(*count)),
                 Some("The keyboard does not have these yet.".to_string()),
@@ -208,6 +199,7 @@ impl Question {
             scroll: 0,
             actions,
             warn,
+            pinned: false,
         }
     }
 }
@@ -299,7 +291,7 @@ struct Holding {
 
 struct Session<Phase> {
     board: vial::Board,
-    /// 0-based. `text` prints `layer + 1`.
+    /// 0-based, as QMK and the tabs count.
     layer: u8,
     selection: Option<vial::Place>,
     phase: Phase,
@@ -429,7 +421,8 @@ impl Model {
         Self { kind, notice: None }
     }
 
-    pub(crate) fn handle(&mut self, event: Event) -> Result<Step> {
+    /// `cols` is the screen width: the key grid moves Up and Down a whole row of it.
+    pub(crate) fn handle(&mut self, event: Event, cols: u16) -> Result<Step> {
         if !matches!(event, Event::Tick) {
             self.notice = None;
         }
@@ -444,9 +437,10 @@ impl Model {
             }
         }
         match keys::act(view_of(&self.kind), &event) {
-            keys::Act::Nudge(dir) => self.arrow(dir),
+            keys::Act::Nudge(dir) => self.arrow(dir, cols),
+            keys::Act::Palette => self.open_palette(""),
             keys::Act::Shelf(delta) => self.shelf(delta),
-            keys::Act::Page(delta) => self.page(delta),
+            keys::Act::Page(delta) => self.page(delta, cols),
             keys::Act::Layer(delta) => self.layer(delta),
             keys::Act::Tab(delta) => self.tab(delta),
             keys::Act::End(end) => self.end(end),
@@ -456,7 +450,7 @@ impl Model {
             keys::Act::Insert(step) => self.insert(step),
             keys::Act::Reorder(delta) => self.reorder(delta),
             keys::Act::Undo => self.undo(),
-            keys::Act::Command => self.open_command(),
+            keys::Act::Command => self.open_palette(":"),
             keys::Act::Confirm => self.confirm(),
             keys::Act::Cancel => self.cancel(),
             keys::Act::Tick => self.tick(),
@@ -520,41 +514,64 @@ impl Model {
         Ok(Step::Continue)
     }
 
-    fn open_command(&mut self) -> Result<Step> {
-        self.kind = match mem::replace(&mut self.kind, vacant()) {
-            ModelKind::Map(session) => ModelKind::Command {
-                session,
-                back: None,
-                text: String::new(),
-            },
-            ModelKind::Sheet { session, spot } => ModelKind::Command {
-                session,
-                back: Some(spot),
-                text: String::new(),
-            },
-            other => other,
+    fn open_palette(&mut self, text: &str) -> Result<Step> {
+        let (session, back) = match mem::replace(&mut self.kind, vacant()) {
+            ModelKind::Map(session) => (session, None),
+            ModelKind::Sheet { session, spot } => (session, Some(spot)),
+            other => {
+                self.kind = other;
+                return Ok(Step::Continue);
+            }
+        };
+        self.kind = ModelKind::Palette {
+            session,
+            back,
+            text: text.to_string(),
+            cursor: None,
         };
         Ok(Step::Continue)
     }
 
-    /// `:w` write, `:wq` or `:x` write and quit, `:q` quit, `:q!` quit without writing,
-    /// `:e!` discard every change, `:u` undo.
+    /// Enter on a Ctrl-K row.
+    fn go(
+        &mut self,
+        session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        goal: Goal,
+    ) -> Result<Step> {
+        let mut session = session;
+        self.kind = match goal {
+            Goal::Run(command) => return self.run_command(session, back, command),
+            Goal::Layer(layer) => {
+                session.layer = layer;
+                ModelKind::Map(session)
+            }
+            Goal::Jump(vial::Jump::Key { layer, place }) => {
+                session.layer = layer;
+                session.selection = Some(place);
+                ModelKind::Map(session)
+            }
+            Goal::Jump(vial::Jump::Spot(spot)) => ModelKind::Sheet { session, spot },
+        };
+        Ok(Step::Continue)
+    }
+
     fn run_command(
         &mut self,
         session: Session<Mapping>,
         back: Option<vial::Spot>,
-        text: &str,
+        command: Cmd,
     ) -> Result<Step> {
         let mut session = session;
-        match text.trim() {
-            "w" | "write" => return self.save(session, back, false),
-            "wq" | "x" => return self.save(session, back, true),
-            "q!" => return Ok(Step::Quit),
-            "q" | "quit" => {
+        match command {
+            Cmd::Write => return self.save(session, back, false),
+            Cmd::WriteQuit => return self.save(session, back, true),
+            Cmd::ForceQuit => return Ok(Step::Quit),
+            Cmd::Quit => {
                 self.kind = back_to(session, back);
                 return self.quit();
             }
-            "e!" | "discard" => {
+            Cmd::Discard => {
                 let (count, lines) = pending_lines(&session.board);
                 if count == 0 {
                     self.notice = Some("nothing to discard".to_string());
@@ -567,16 +584,14 @@ impl Model {
                     return Ok(Step::Continue);
                 }
             }
-            "u" | "undo" => {
+            Cmd::Undo => {
                 if !session.board.undo() {
                     self.notice = Some("nothing to undo".to_string());
                 }
             }
-            "" => {}
-            other => {
-                self.notice = Some(format!(
-                    "not a command: :{other}   (:w write · :wq write and quit · :q quit · :q! quit without writing · :e! discard)"
-                ));
+            Cmd::Help => {
+                self.kind = back_to(session, back);
+                return self.open_help();
             }
         }
         self.kind = back_to(session, back);
@@ -638,7 +653,7 @@ impl Model {
         self.kind = back_to(session, spot);
     }
 
-    fn arrow(&mut self, dir: vial::Dir) -> Result<Step> {
+    fn arrow(&mut self, dir: vial::Dir, cols: u16) -> Result<Step> {
         match &mut self.kind {
             ModelKind::Pick {
                 candidates, cursor, ..
@@ -673,14 +688,29 @@ impl Model {
                 cursor,
                 ..
             } => {
-                let len = session.list(browse).hits.len();
-                move_cursor(cursor, len, dir);
+                let hits = session.list(browse).hits;
+                grid_step(cursor, hits.len(), vial::search_across(&hits, cols), dir);
+            }
+            ModelKind::Palette {
+                session,
+                text,
+                cursor,
+                ..
+            } => {
+                let len = palette(&session.board, text).len();
+                // Nothing picked yet: the first arrow lands on the first row.
+                *cursor = match palette_pick(text, len, *cursor) {
+                    None => (len > 0).then_some(0),
+                    Some(mut at) => {
+                        move_cursor(&mut at, len, dir);
+                        Some(at)
+                    }
+                };
             }
             ModelKind::Edit { .. }
             | ModelKind::Hold { .. }
             | ModelKind::Release { .. }
             | ModelKind::Ask { .. }
-            | ModelKind::Command { .. }
             | ModelKind::Help { .. } => {}
         }
         Ok(Step::Continue)
@@ -695,6 +725,24 @@ impl Model {
 
     /// One tab per layer, then each editor the board has entries for. A sheet starts at its first cell.
     fn tab(&mut self, delta: i8) -> Result<Step> {
+        // After `:` Tab fills in the picked command's name, or the first match's.
+        if let ModelKind::Palette {
+            session,
+            text,
+            cursor,
+            ..
+        } = &mut self.kind
+        {
+            if text.starts_with(':') {
+                let rows = palette(&session.board, text);
+                let pick = palette_pick(text, rows.len(), *cursor).unwrap_or(0);
+                if let Some((_, _, Goal::Run(command))) = rows.get(pick) {
+                    *text = format!(":{}", command_name(*command));
+                    *cursor = None;
+                }
+            }
+            return Ok(Step::Continue);
+        }
         let (mut session, at) = match mem::replace(&mut self.kind, vacant()) {
             ModelKind::Map(session) => {
                 let at = usize::from(session.layer);
@@ -754,9 +802,10 @@ impl Model {
                     text.push(ch);
                 }
             }
-            ModelKind::Command { text, .. } => {
+            ModelKind::Palette { text, cursor, .. } => {
                 if !ch.is_control() {
                     text.push(ch);
+                    *cursor = None;
                 }
             }
             _ => {}
@@ -764,7 +813,7 @@ impl Model {
         Ok(Step::Continue)
     }
 
-    fn page(&mut self, delta: i8) -> Result<Step> {
+    fn page(&mut self, delta: i8, cols: u16) -> Result<Step> {
         match &mut self.kind {
             ModelKind::Pick {
                 candidates, cursor, ..
@@ -776,8 +825,15 @@ impl Model {
                 cursor,
                 ..
             } => {
-                let len = session.list(browse).hits.len();
-                shift(cursor, len, delta);
+                // Four rows of the grid at a time.
+                let hits = session.list(browse).hits;
+                let step = vial::search_across(&hits, cols) * 4;
+                let last = hits.len().saturating_sub(1);
+                *cursor = if delta < 0 {
+                    cursor.saturating_sub(step)
+                } else {
+                    (*cursor + step).min(last)
+                };
             }
             ModelKind::Sheet { session, spot, .. } => {
                 shift(&mut spot.row, sheet_rows(&session.board, spot.tab), delta);
@@ -791,7 +847,7 @@ impl Model {
             | ModelKind::Hold { .. }
             | ModelKind::Release { .. }
             | ModelKind::Ask { .. }
-            | ModelKind::Command { .. } => {}
+            | ModelKind::Palette { .. } => {}
         }
         Ok(Step::Continue)
     }
@@ -827,7 +883,7 @@ impl Model {
             | ModelKind::Hold { .. }
             | ModelKind::Release { .. }
             | ModelKind::Ask { .. }
-            | ModelKind::Command { .. } => {}
+            | ModelKind::Palette { .. } => {}
         }
         Ok(Step::Continue)
     }
@@ -864,6 +920,11 @@ impl Model {
 
     fn backspace(&mut self) -> Result<Step> {
         match &mut self.kind {
+            // Backspace with nothing typed closes the key list, for a keyboard without Esc.
+            ModelKind::Search {
+                browse: Browse::Shelf(_),
+                ..
+            } => return self.cancel(),
             ModelKind::Search { browse, cursor, .. } => {
                 let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
                 *browse = old.backspace();
@@ -872,11 +933,14 @@ impl Model {
             ModelKind::Edit { text, .. } => {
                 text.pop();
             }
-            // Backspace on an empty command line closes it, as in vim.
-            ModelKind::Command { text, .. } if !text.is_empty() => {
-                text.pop();
+            // Backspace on an empty line closes it, as in vim after `:`.
+            ModelKind::Palette { text, .. } if text.is_empty() || text == ":" => {
+                return self.cancel()
             }
-            ModelKind::Command { .. } => return self.cancel(),
+            ModelKind::Palette { text, cursor, .. } => {
+                text.pop();
+                *cursor = None;
+            }
             _ => {}
         }
         Ok(Step::Continue)
@@ -913,13 +977,35 @@ impl Model {
             }
             ModelKind::Map(session) => self.kind = searching(session, Target::Key),
             ModelKind::Sheet { session, spot } => self.kind = open_cell(session, spot),
+            ModelKind::Palette {
+                session,
+                back,
+                text,
+                cursor,
+            } => {
+                let rows = palette(&session.board, &text);
+                match palette_pick(&text, rows.len(), cursor) {
+                    Some(at) => return self.go(session, back, rows[at].2),
+                    // Typed, and nothing matches: the popup says so and stays.
+                    None if rows.is_empty() => {
+                        self.kind = ModelKind::Palette {
+                            session,
+                            back,
+                            text,
+                            cursor,
+                        }
+                    }
+                    // Nothing typed, nothing picked: Enter only closes, as `:` then Enter in vim.
+                    None => self.kind = back_to(session, back),
+                }
+            }
             ModelKind::Search {
                 session,
                 browse,
                 cursor,
                 wrap,
                 target,
-            } => self.kind = confirm_search(session, browse, cursor, wrap, target),
+            } => self.confirm_search(session, browse, cursor, wrap, target),
             ModelKind::Edit {
                 session,
                 spot,
@@ -934,11 +1020,6 @@ impl Model {
                 back,
                 question,
             } => return self.answer(session, back, question, 'y'),
-            ModelKind::Command {
-                session,
-                back,
-                text,
-            } => return self.run_command(session, back, &text),
             other => self.kind = other,
         }
         Ok(Step::Continue)
@@ -1163,7 +1244,7 @@ impl Model {
                 back,
                 question,
             } => return self.answer(session, back, question, 'n'),
-            ModelKind::Command { session, back, .. } => self.kind = back_to(session, back),
+            ModelKind::Palette { session, back, .. } => self.kind = back_to(session, back),
             ModelKind::Help { under, .. } => self.kind = *under,
             other => self.kind = other,
         }
@@ -1181,9 +1262,6 @@ impl Model {
     ) -> Result<Step> {
         let mut session = session;
         match (question, ch) {
-            (Question::Change { write, after, .. }, 'y' | 'Y') => {
-                self.land(session, write, after.or(back));
-            }
             (Question::Quit { .. }, 'w' | 'W' | 'y' | 'Y') => {
                 return self.save(session, back, true)
             }
@@ -1193,10 +1271,7 @@ impl Model {
                 self.notice = Some(format!("discarded {count} staged change(s)"));
                 self.kind = back_to(session, back);
             }
-            (
-                Question::Change { .. } | Question::Quit { .. } | Question::Discard { .. },
-                'n' | 'N',
-            ) => {
+            (Question::Quit { .. } | Question::Discard { .. }, 'n' | 'N') => {
                 self.kind = back_to(session, back);
             }
             (question, _) => {
@@ -1481,7 +1556,7 @@ fn reading_board(kind: &mut ModelKind) -> Option<&mut vial::Board> {
         | ModelKind::Search { session, .. }
         | ModelKind::Edit { session, .. }
         | ModelKind::Ask { session, .. }
-        | ModelKind::Command { session, .. } => Some(&mut session.board),
+        | ModelKind::Palette { session, .. } => Some(&mut session.board),
         ModelKind::Help { under, .. } => reading_board(under),
         _ => None,
     }
@@ -1501,7 +1576,7 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
         ModelKind::Hold { session, back, .. } => Some((session.cancel(), back)),
         ModelKind::Release { session, back, .. }
         | ModelKind::Ask { session, back, .. }
-        | ModelKind::Command { session, back, .. }
+        | ModelKind::Palette { session, back, .. }
         | ModelKind::Lost { session, back, .. } => Some((session, back)),
         ModelKind::Help { under, .. } => into_session(*under),
         ModelKind::Pick { .. } | ModelKind::Open { .. } => None,
@@ -1563,71 +1638,79 @@ fn open_cell(session: Session<Mapping>, spot: vial::Spot) -> ModelKind {
     }
 }
 
-fn confirm_search(
-    session: Session<Mapping>,
-    browse: Browse,
-    cursor: usize,
-    wrap: Option<Wrap>,
-    target: Target,
-) -> ModelKind {
-    let found = session.list(&browse).hits.into_iter().nth(cursor);
-    let code = match (found, &wrap) {
-        // Vial fills a `(kc)` code with a basic key only.
-        (Some(found), Some(outer)) if found.code <= 0xFF => outer.code | found.code,
-        (Some(found), None) if found.masked => {
-            return ModelKind::Search {
-                session,
-                browse: Browse::Shelf(ShelfIndex(0)),
-                cursor: 0,
-                wrap: Some(Wrap {
-                    code: found.code,
-                    legend: found.legend,
-                }),
-                target,
-            };
-        }
-        (Some(found), None) => found.code,
-        _ => {
-            return ModelKind::Search {
-                session,
-                browse,
-                cursor,
-                wrap,
-                target,
+impl Model {
+    /// Enter in the key list stages the highlighted hit at once: the board already previews it,
+    /// and `u` takes it back. A `(kc)` code first asks for the basic key that fills it.
+    fn confirm_search(
+        &mut self,
+        session: Session<Mapping>,
+        browse: Browse,
+        cursor: usize,
+        wrap: Option<Wrap>,
+        target: Target,
+    ) {
+        let found = session.list(&browse).hits.into_iter().nth(cursor);
+        let code = match (found, &wrap) {
+            // Vial fills a `(kc)` code with a basic key only.
+            (Some(found), Some(outer)) if found.code <= 0xFF => outer.code | found.code,
+            (Some(found), None) if found.masked => {
+                self.kind = ModelKind::Search {
+                    session,
+                    browse: Browse::Shelf(ShelfIndex(0)),
+                    cursor: 0,
+                    wrap: Some(Wrap {
+                        code: found.code,
+                        legend: found.legend,
+                    }),
+                    target,
+                };
+                return;
             }
-        }
-    };
-    let hit = Hit { code };
-    let (write, back, after) = match target {
-        Target::Key => {
-            let Some(place) = session.selection else {
-                return ModelKind::Map(session);
-            };
-            let layer = session.layer;
-            (
-                vial::Write::Key {
-                    layer,
-                    place,
-                    code: hit.code,
-                },
-                None,
-                None,
-            )
-        }
-        Target::Cell { spot, insert } => {
-            let (write, after) = cell_write(&session, spot, insert, hit);
-            (write, Some(spot), Some(after))
-        }
-    };
-    let lines = session.board.describe(&write, false);
-    ModelKind::Ask {
-        session,
-        back,
-        question: Question::Change {
-            write,
-            after,
-            lines,
-        },
+            (Some(found), None) => found.code,
+            _ => {
+                self.kind = ModelKind::Search {
+                    session,
+                    browse,
+                    cursor,
+                    wrap,
+                    target,
+                };
+                return;
+            }
+        };
+        let hit = Hit { code };
+        let (write, after) = match target {
+            Target::Key => {
+                let Some(place) = session.selection else {
+                    self.kind = ModelKind::Map(session);
+                    return;
+                };
+                let layer = session.layer;
+                (
+                    vial::Write::Key {
+                        layer,
+                        place,
+                        code: hit.code,
+                    },
+                    None,
+                )
+            }
+            Target::Cell { spot, insert } => {
+                let (write, after) = cell_write(&session, spot, insert, hit);
+                (write, Some(after))
+            }
+        };
+        self.land(session, write, after);
+    }
+}
+
+/// A macro step given a new key: a press or a release stays one, anything else becomes a tap.
+/// Staging and the key list's preview both use this, so the preview is what Enter stages.
+fn replaced_step(step: &vial::Action, code: u16) -> vial::Action {
+    match step {
+        vial::Action::Down(_) => vial::Action::Down(code),
+        vial::Action::Up(_) => vial::Action::Up(code),
+        _ => vial::Action::Tap(code),
     }
 }
 
@@ -1666,11 +1749,7 @@ fn cell_write(
                 }
                 None => {
                     if let Some(step) = steps.get_mut(at) {
-                        *step = match step {
-                            vial::Action::Down(_) => vial::Action::Down(code),
-                            vial::Action::Up(_) => vial::Action::Up(code),
-                            _ => vial::Action::Tap(code),
-                        };
+                        *step = replaced_step(step, code);
                     }
                     at
                 }
@@ -1779,18 +1858,226 @@ fn view_of(kind: &ModelKind) -> keys::View {
         } => keys::View::Hold,
         ModelKind::Lost { .. } => keys::View::Lost,
         ModelKind::Map(_) => keys::View::Map,
+        ModelKind::Sheet { session, .. } if session.board.reading().is_some() => {
+            keys::View::Reading
+        }
         ModelKind::Sheet { .. } => keys::View::Sheet,
         ModelKind::Search { .. } => keys::View::Search,
         ModelKind::Edit { .. } => keys::View::Edit,
         ModelKind::Hold { .. } | ModelKind::Release { .. } => keys::View::Hold,
         ModelKind::Ask { .. } => keys::View::Ask,
-        ModelKind::Command { .. } => keys::View::Command,
+        ModelKind::Palette { .. } => keys::View::Palette,
         ModelKind::Help { .. } => keys::View::Help,
     }
 }
 
 fn help_lines(under: &ModelKind) -> Vec<vial::PopupLine> {
     keys::cheatsheet(view_of(under))
+}
+
+/// What a Ctrl-K row does.
+#[derive(Clone, Copy)]
+enum Goal {
+    /// A `:` command, run as if typed.
+    Run(Cmd),
+    Layer(u8),
+    Jump(vial::Jump),
+}
+
+/// A `:` command.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cmd {
+    Write,
+    WriteQuit,
+    Undo,
+    Discard,
+    Help,
+    Quit,
+    ForceQuit,
+}
+
+/// Every `:` command: its names (Tab fills in the first), and what it does.
+/// The `:` rows of the find-anything list and its `run` group both read this.
+const COMMANDS: [(Cmd, &[&str], &str); 7] = [
+    (
+        Cmd::Write,
+        &["w", "write"],
+        "write every change to the keyboard",
+    ),
+    (Cmd::WriteQuit, &["wq", "x"], "write, then quit"),
+    (Cmd::Undo, &["u", "undo"], "undo the last change"),
+    (
+        Cmd::Discard,
+        &["e!", "discard"],
+        "discard every unsaved change",
+    ),
+    (Cmd::Help, &["help", "h"], "show every key"),
+    (
+        Cmd::Quit,
+        &["q", "quit"],
+        "quit, asking first when changes are unsaved",
+    ),
+    (Cmd::ForceQuit, &["q!"], "quit without writing"),
+];
+
+/// The name Tab fills in after `:`.
+fn command_name(command: Cmd) -> &'static str {
+    COMMANDS
+        .iter()
+        .find(|(at, ..)| *at == command)
+        .map_or("", |(_, names, _)| names[0])
+}
+
+/// After `:`: each command with a name that starts with `typed`, every one when nothing is typed.
+/// An exact name sorts first, so `:q` runs quit and not `:q!`; then table order, so `:wr` writes.
+fn command_rows(typed: &str) -> Vec<(&'static str, String, Goal)> {
+    let names = |names: &[&str]| -> String {
+        names
+            .iter()
+            .map(|name| format!(":{name}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    // Every command's width, not just the matches', so the columns stay put while typing.
+    let width = COMMANDS
+        .iter()
+        .map(|(_, list, _)| names(list).chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut hits: Vec<_> = COMMANDS
+        .iter()
+        .filter(|(_, list, _)| list.iter().any(|name| name.starts_with(typed)))
+        .collect();
+    hits.sort_by_key(|(_, list, _)| !list.contains(&typed));
+    hits.into_iter()
+        .map(|(command, list, what)| {
+            let label = format!("{:<width$}   {what}", names(list));
+            ("commands", label, Goal::Run(*command))
+        })
+        .collect()
+}
+
+/// The row Enter runs: the one ↑↓ chose, else the first once something is typed. With nothing
+/// typed, nothing is picked, so Space then Enter cannot run a command by accident.
+fn palette_pick(text: &str, len: usize, cursor: Option<usize>) -> Option<usize> {
+    let typed = !text.trim_start_matches(':').trim().is_empty();
+    cursor.or(typed.then_some(0)).filter(|&at| at < len)
+}
+
+/// Rows the popup shows at once. The window follows the cursor.
+const PALETTE_ROWS: usize = 12;
+
+/// The popup's rows for `query`, as `(group, label, goal)`. A leading `:` lists commands by name
+/// (`command_rows`). Otherwise every word of the query must appear in the row, and keys on the
+/// board join once something is typed; there are hundreds.
+fn palette(board: &vial::Board, query: &str) -> Vec<(&'static str, String, Goal)> {
+    if let Some(typed) = query.strip_prefix(':') {
+        return command_rows(typed.trim());
+    }
+    let mut rows: Vec<(&'static str, String, String, Goal)> = COMMANDS
+        .iter()
+        .map(|(command, names, what)| {
+            (
+                "run",
+                format!("{what}   :{}", names[0]),
+                String::new(),
+                Goal::Run(*command),
+            )
+        })
+        .collect();
+    rows.extend((0..board.layer_count()).map(|layer| {
+        (
+            "go to",
+            format!("layer {layer}   L{layer}"),
+            String::new(),
+            Goal::Layer(layer),
+        )
+    }));
+    rows.extend(board.editors().into_iter().map(|tab| {
+        let spot = vial::Spot {
+            tab,
+            row: 0,
+            col: 0,
+        };
+        (
+            "go to",
+            tab.name().to_string(),
+            String::new(),
+            Goal::Jump(vial::Jump::Spot(spot)),
+        )
+    }));
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if !words.is_empty() {
+        rows.extend(
+            board
+                .jumps()
+                .into_iter()
+                .map(|(jump, label, more)| ("on the board", label, more, Goal::Jump(jump))),
+        );
+    }
+    rows.into_iter()
+        .filter(|(_, label, more, _)| {
+            let hay = format!("{label} {more}").to_lowercase();
+            words.iter().all(|word| hay.contains(word.as_str()))
+        })
+        .map(|(group, label, _, goal)| (group, label, goal))
+        .collect()
+}
+
+/// The query line, then a window of hits under group headings. After `:` it is the command line.
+fn palette_popup(
+    rows: &[(&'static str, String, Goal)],
+    text: &str,
+    pick: Option<usize>,
+) -> vial::Popup {
+    let command = text.starts_with(':');
+    // Padded so the box keeps one width while the hits change under it.
+    let mut lines = vec![
+        vial::PopupLine::Text(format!("{:<60}", format!("› {text}▏"))),
+        vial::PopupLine::Blank,
+    ];
+    let start = pick.unwrap_or(0).saturating_sub(PALETTE_ROWS - 1);
+    let mut group = "";
+    for (index, (in_group, label, _)) in rows.iter().enumerate().skip(start).take(PALETTE_ROWS) {
+        if *in_group != group {
+            group = in_group;
+            lines.push(vial::PopupLine::Heading(group.to_string()));
+        }
+        lines.push(vial::PopupLine::Choice(label.clone(), pick == Some(index)));
+    }
+    if rows.is_empty() {
+        lines.push(vial::PopupLine::Text(if command {
+            format!("no command starts with {}", text.trim())
+        } else {
+            "no match".to_string()
+        }));
+    } else if rows.len() > PALETTE_ROWS {
+        lines.push(vial::PopupLine::Blank);
+        lines.push(vial::PopupLine::Text(format!(
+            "{} of {}",
+            pick.unwrap_or(0) + 1,
+            rows.len()
+        )));
+    }
+    let (title, actions) = if command {
+        (
+            "command",
+            vec![("tab", "complete"), ("enter", "run"), ("esc", "close")],
+        )
+    } else {
+        (
+            "find anything",
+            vec![("↑↓", "move"), ("enter", "go"), ("esc", "close")],
+        )
+    };
+    vial::Popup {
+        title: title.to_string(),
+        lines,
+        scroll: 0,
+        actions,
+        warn: false,
+        pinned: true,
+    }
 }
 
 /// The status bar badge for each view. Typing views are `Input`, waiting on the keyboard is `Alert`.
@@ -1814,7 +2101,8 @@ fn mode_of(kind: &ModelKind) -> vial::Mode {
         ),
         ModelKind::Search { .. } => ("SEARCH", Input),
         ModelKind::Edit { .. } => ("EDIT", Input),
-        ModelKind::Command { .. } => ("COMMAND", Input),
+        ModelKind::Palette { text, .. } if text.starts_with(':') => ("COMMAND", Input),
+        ModelKind::Palette { .. } => ("FIND", Input),
         ModelKind::Ask { .. } => ("CONFIRM", Alert),
         ModelKind::Hold { .. } | ModelKind::Release { .. } => ("UNLOCK", Alert),
         ModelKind::Help { under, .. } => return mode_of(under),
@@ -1908,6 +2196,7 @@ fn render(
                 scroll: 0,
                 actions,
                 warn: true,
+                pinned: false,
             };
             let chrome = Chrome {
                 popup: Some(&popup),
@@ -1925,10 +2214,42 @@ fn render(
             target,
         } => {
             let listed = search_list(session, browse, wrap);
+            let query = match browse {
+                Browse::Find { query, .. } => query.as_str(),
+                Browse::Shelf(_) => "",
+            };
+            // What Enter would stage, by the same rules as `confirm_search` and `cell_write`:
+            // after a `(kc)` pick only a basic key fills it, and a macro step keeps its kind.
+            let preview = listed
+                .hits
+                .get(*cursor)
+                .and_then(|hit| match wrap {
+                    Some(outer) => (hit.code <= 0xFF).then_some(outer.code | hit.code),
+                    None => Some(hit.code),
+                })
+                .and_then(|code| match target {
+                    Target::Cell {
+                        spot,
+                        insert: Some(press),
+                    } if spot.tab == vial::Tab::Macros => Some(vial::Preview::Step {
+                        action: press.action(code),
+                        insert: true,
+                    }),
+                    Target::Cell { spot, insert: None } if spot.tab == vial::Tab::Macros => {
+                        let step = session.board.macros().get(spot.row)?.get(spot.col)?;
+                        Some(vial::Preview::Step {
+                            action: replaced_step(step, code),
+                            insert: false,
+                        })
+                    }
+                    _ => Some(vial::Preview::Code(code)),
+                });
             let lower = vial::Lower::Search {
                 title: &listed.title,
+                query,
                 hits: &listed.hits,
                 cursor: *cursor,
+                preview: preview.as_ref(),
             };
             session.paint(target.spot(), None, Some(lower), &chrome)
         }
@@ -1962,17 +2283,20 @@ fn render(
             };
             session.paint(*back, None, None, &chrome)
         }
-        ModelKind::Command {
+        ModelKind::Palette {
             session,
             back,
             text,
+            cursor,
         } => {
-            let line = format!(":{text}");
-            let lower = vial::Lower::Edit {
-                title: "command  :w write · :wq write and quit · :q quit · :q! quit without writing · :e! discard",
-                text: &line,
+            let rows = palette(&session.board, text);
+            let pick = palette_pick(text, rows.len(), *cursor);
+            let popup = palette_popup(&rows, text, pick);
+            let chrome = Chrome {
+                popup: Some(&popup),
+                ..chrome
             };
-            session.paint(*back, None, Some(lower), &chrome)
+            session.paint(*back, None, None, &chrome)
         }
         ModelKind::Help { under, scroll } => {
             let popup = vial::Popup {
@@ -1981,6 +2305,7 @@ fn render(
                 scroll: *scroll,
                 actions: vec![("j k", "scroll"), ("esc", "close")],
                 warn: false,
+                pinned: false,
             };
             render(under, notice, Some(&popup), cols, rows)
         }
@@ -2006,6 +2331,22 @@ fn shift(cursor: &mut usize, len: usize, delta: i8) {
     let next = *cursor as i32 + step;
     let max = len.saturating_sub(1) as i32;
     *cursor = next.clamp(0, max) as usize;
+}
+
+/// One step in the key grid, `across` hits a row: Left and Right to the neighbour, Up and Down
+/// a row, staying put at an edge. Down onto a short last row lands on its last hit.
+fn grid_step(cursor: &mut usize, len: usize, across: usize, dir: vial::Dir) {
+    let Some(last) = len.checked_sub(1) else {
+        *cursor = 0;
+        return;
+    };
+    *cursor = match dir {
+        vial::Dir::Left => cursor.saturating_sub(1),
+        vial::Dir::Right => (*cursor + 1).min(last),
+        vial::Dir::Up if *cursor >= across => *cursor - across,
+        vial::Dir::Down if *cursor / across < last / across => (*cursor + across).min(last),
+        vial::Dir::Up | vial::Dir::Down => *cursor,
+    };
 }
 
 fn move_cursor(cursor: &mut usize, len: usize, dir: vial::Dir) {

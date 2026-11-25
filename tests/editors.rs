@@ -45,6 +45,38 @@ fn board() -> lazyvial::Result<MemoryBoard> {
 }
 
 #[test]
+fn key_list_previews_on_sheet_cells_in_amber() -> lazyvial::Result<()> {
+    let amber = "48;2;224;175;104";
+    let board = board()?;
+    let mut app = App::new(board.open()?, TestScreen::new(100, 30));
+    // A tap dance key cell: the pick replaces it, in amber, before Enter.
+    app.handle(Event::Tab)?;
+    app.handle(Event::Confirm)?;
+    press(&mut app, "esc")?;
+    let raw = app.screen().text().to_string();
+    assert!(line_with(&raw, "TD(0)").contains(amber), "{raw}");
+    assert!(plain(&app).contains("NO → Esc"), "{}", plain(&app));
+    app.handle(Event::Cancel)?;
+    assert!(!app.screen().text().contains(amber));
+    assert!(!app.screen().text().contains("unsaved"));
+    // A new macro step: it goes in at the cursor, in amber, and the status says so.
+    app.handle(Event::BackTab)?;
+    app.handle(Event::BackTab)?;
+    press(&mut app, "t")?;
+    press(&mut app, "a")?;
+    let text = plain(&app);
+    assert!(text.contains("new step → A"), "{text}");
+    assert!(
+        line_with(app.screen().text(), "M0").contains(amber),
+        "{}",
+        app.screen().text()
+    );
+    app.handle(Event::Confirm)?;
+    assert!(plain(&app).contains("1 unsaved"), "{}", plain(&app));
+    Ok(())
+}
+
+#[test]
 fn tap_dance_keys_and_term_reach_the_board() -> lazyvial::Result<()> {
     let board = board()?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
@@ -57,12 +89,6 @@ fn tap_dance_keys_and_term_reach_the_board() -> lazyvial::Result<()> {
     app.handle(Event::Down)?;
     app.handle(Event::Confirm)?;
     press(&mut app, "esc")?;
-    app.handle(Event::Confirm)?;
-    let text = plain(&app);
-    assert!(
-        text.contains("TD(1)") && text.contains("tap  NO  →  Esc"),
-        "{text}"
-    );
     app.handle(Event::Confirm)?;
     for _ in 0..4 {
         app.handle(Event::Right)?;
@@ -105,7 +131,6 @@ fn locked_board_takes_a_combo_without_unlocking() -> lazyvial::Result<()> {
     }
     app.handle(Event::Confirm)?;
     press(&mut app, "f13")?;
-    app.handle(Event::Confirm)?;
     app.handle(Event::Confirm)?;
     write(&mut app)?;
     let text = app.screen().text().to_string();
@@ -156,7 +181,6 @@ fn macro_steps_reach_the_board() -> lazyvial::Result<()> {
     press(&mut app, "t")?;
     press(&mut app, "a")?;
     app.handle(Event::Confirm)?;
-    app.handle(Event::Confirm)?;
     press(&mut app, "w")?;
     app.handle(Event::Confirm)?;
     // Move the tap in front of the text.
@@ -200,29 +224,21 @@ fn macros_that_overflow_the_buffer_are_refused() -> lazyvial::Result<()> {
 }
 
 #[test]
-fn picks_ask_first_and_wait_for_write() -> lazyvial::Result<()> {
+fn picks_stage_at_once_and_wait_for_write() -> lazyvial::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
+    // One Enter stages the pick; the board previewed it already.
     press(&mut app, "/esc")?;
     app.handle(Event::Confirm)?;
     let text = plain(&app);
     assert!(
-        text.contains("LAYER 1 KEY 0,0") && text.contains("NO  →  Esc"),
+        text.contains("selected Esc") && text.contains("1 unsaved"),
         "{text}"
     );
-    // Esc on the question drops the pick.
-    app.handle(Event::Cancel)?;
-    assert!(!app.screen().text().contains("unsaved"));
-    press(&mut app, "/esc")?;
-    app.handle(Event::Confirm)?;
-    press(&mut app, "y")?;
-    assert!(app.screen().text().contains("selected Esc"));
-    assert!(app.screen().text().contains("1 unsaved"));
     // The changed key is tinted until written, once the cursor leaves it.
     let board2 = MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
     let mut corne = App::new(board2.open()?, TestScreen::new(120, 30));
     press(&mut corne, "/esc")?;
-    corne.handle(Event::Confirm)?;
     corne.handle(Event::Confirm)?;
     // Green legend on the key face, as opposed to the header's unsaved count.
     let tint = "38;2;158;206;106;48;2;39;44;57";
@@ -242,7 +258,6 @@ fn undo_and_discard_drop_staged_changes() -> lazyvial::Result<()> {
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     for query in ["/esc", "/tab"] {
         press(&mut app, query)?;
-        app.handle(Event::Confirm)?;
         app.handle(Event::Confirm)?;
     }
     assert!(app.screen().text().contains("selected Tab"));
@@ -270,7 +285,44 @@ fn undo_and_discard_drop_staged_changes() -> lazyvial::Result<()> {
     assert!(app.screen().text().contains("nothing to undo"));
     press(&mut app, ":nope")?;
     app.handle(Event::Confirm)?;
-    assert!(app.screen().text().contains("not a command: :nope"));
+    // An unknown command keeps the line open and says so.
+    let text = plain(&app);
+    assert!(text.contains("no command starts with :nope"), "{text}");
+    assert!(text.contains("COMMAND"), "{text}");
+    Ok(())
+}
+
+#[test]
+fn command_line_picks_exact_names_then_prefixes() -> lazyvial::Result<()> {
+    let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = App::new(board.open()?, TestScreen::new(80, 24));
+    press(&mut app, "/esc")?;
+    app.handle(Event::Confirm)?;
+    // `q` is quit, which asks about the unsaved change, not `q!`, which would not.
+    press(&mut app, ":q")?;
+    assert_eq!(app.handle(Event::Confirm)?, Step::Continue);
+    assert!(plain(&app).contains("1 unsaved change"), "{}", plain(&app));
+    app.handle(Event::Cancel)?;
+    // Space then Enter picks nothing, so it only closes: nothing is written.
+    app.handle(Event::Char(' '))?;
+    app.handle(Event::Confirm)?;
+    let text = plain(&app);
+    assert!(
+        text.contains("1 unsaved") && !text.contains("find anything"),
+        "{text}"
+    );
+    // A `:` typed into the find list makes it the command line; Backspace from `:` closes it.
+    press(&mut app, " :")?;
+    assert!(plain(&app).contains("COMMAND"), "{}", plain(&app));
+    app.handle(Event::Backspace)?;
+    assert!(!plain(&app).contains("COMMAND"), "{}", plain(&app));
+    // Tab fills in the first match; a prefix alone runs it too.
+    press(&mut app, ":wr")?;
+    app.handle(Event::Tab)?;
+    assert!(plain(&app).contains("› :w▏"), "{}", plain(&app));
+    app.handle(Event::Confirm)?;
+    let text = plain(&app);
+    assert!(text.contains("wrote 1 change"), "{text}");
     Ok(())
 }
 
@@ -279,7 +331,6 @@ fn quit_with_unsaved_changes_asks() -> lazyvial::Result<()> {
     let board = MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
     press(&mut app, "/esc")?;
-    app.handle(Event::Confirm)?;
     app.handle(Event::Confirm)?;
     assert_eq!(app.handle(Event::Char('q'))?, Step::Continue);
     let text = plain(&app);
@@ -298,7 +349,6 @@ fn quit_with_unsaved_changes_asks() -> lazyvial::Result<()> {
     // `d` quits without writing; `:q!` too.
     press(&mut app, "/tab")?;
     app.handle(Event::Confirm)?;
-    app.handle(Event::Confirm)?;
     assert_eq!(app.handle(Event::Quit)?, Step::Continue);
     assert_eq!(app.handle(Event::Char('d'))?, Step::Quit);
     drop(app);
@@ -315,7 +365,7 @@ fn tab_walks_layers_then_editors_and_search_groups() -> lazyvial::Result<()> {
         .layers(3)
         .tap_dances(1);
     let mut app = App::new(board.open()?, TestScreen::new(80, 20));
-    for title in ["layer 2/3", "layer 3/3", "tap dance 1/1", "layer 1/3"] {
+    for title in ["layer 1/3", "layer 2/3", "tap dance 1/1", "layer 0/3"] {
         app.handle(Event::Tab)?;
         assert!(
             app.screen().text().contains(title),
@@ -346,22 +396,21 @@ fn key_details_fill_the_spare_rows() -> lazyvial::Result<()> {
     let text = plain(&app);
     assert!(text.contains("KC_NO  ·  0x0000  ·  does nothing"), "{text}");
     assert!(
-        text.contains("on each layer  L1  NO   L2  NO   L3  NO"),
+        text.contains("on each layer  L0  NO   L1  NO   L2  NO"),
         "{text}"
     );
-    // Stage MO(1) on L1 and look at it from L2: the row shows it, and says what it does.
+    // Stage MO(1) on L0 and look at it from L1: the row shows it, and says what it does.
     press(&mut app, "/mo(1")?;
     app.handle(Event::Confirm)?;
-    app.handle(Event::Confirm)?;
     let text = plain(&app);
-    assert!(text.contains("layer 1 (tab L2) while held"), "{text}");
+    assert!(text.contains("layer 1 while held"), "{text}");
     assert!(
         text.contains("unsaved: the keyboard still has NO, :w writes MO(1)"),
         "{text}"
     );
     app.handle(Event::Tab)?;
     let text = plain(&app);
-    assert!(text.contains("L1  MO(1)   L2  NO"), "{text}");
+    assert!(text.contains("L0  MO(1)   L1  NO"), "{text}");
     assert!(!text.contains("unsaved: the keyboard"), "{text}");
     // A short screen keeps the keys and drops the details.
     drop(app);
@@ -380,7 +429,6 @@ fn lost_with_one_change(board: &MemoryBoard) -> lazyvial::Result<App<TestScreen>
     app.handle(Event::Tab)?;
     app.handle(Event::Confirm)?;
     press(&mut app, "esc")?;
-    app.handle(Event::Confirm)?;
     app.handle(Event::Confirm)?;
     board.unplug();
     write(&mut app)?;

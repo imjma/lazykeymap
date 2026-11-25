@@ -10,6 +10,19 @@ pub(in crate::session) enum Place {
     Encoder { index: u8, direction: u8 },
 }
 
+/// `key 0,1` or `encoder 0 cw`.
+impl std::fmt::Display for Place {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Place::Matrix { row, col } => write!(f, "key {row},{col}"),
+            Place::Encoder { index, direction } => {
+                let turn = if *direction == 0 { "cw" } else { "ccw" };
+                write!(f, "encoder {index} {turn}")
+            }
+        }
+    }
+}
+
 pub(super) struct Definition {
     pub(super) rows_n: u8,
     pub(super) cols_n: u8,
@@ -71,6 +84,9 @@ pub(super) struct Cap {
     pub(super) unlock: bool,
     /// Staged and not yet written to the keyboard.
     pub(super) changed: bool,
+    /// While the key list is open: what this key holds now. `legend` is then the highlighted
+    /// keycode, drawn in amber so the change shows before Enter.
+    pub(super) was: Option<String>,
     pub(super) decal: bool,
     pub(super) tone: Tone,
     /// World x, after rotation. Column start is `round(x * 5)`.
@@ -262,8 +278,12 @@ pub(in crate::session) enum ModeTone {
 pub(in crate::session) enum Lower<'a> {
     Search {
         title: &'a str,
+        /// What is typed, drawn on the panel's first line.
+        query: &'a str,
         hits: &'a [Found],
         cursor: usize,
+        /// What Enter would stage, drawn in amber on the key or cell it changes.
+        preview: Option<&'a super::Preview>,
     },
     /// A one-line text or number field.
     Edit { title: &'a str, text: &'a str },
@@ -279,6 +299,9 @@ pub(in crate::session) struct Popup {
     pub(in crate::session) actions: Vec<(&'static str, &'static str)>,
     /// Amber frame for a question that loses or writes data; blue otherwise.
     pub(in crate::session) warn: bool,
+    /// Drawn a few rows from the top instead of centered, so a list that filters as you type
+    /// keeps its query line in one place.
+    pub(in crate::session) pinned: bool,
 }
 
 #[derive(Clone)]
@@ -310,6 +333,8 @@ pub(super) struct SheetCell {
     pub(super) tone: Tone,
     /// Staged and not yet written to the keyboard.
     pub(super) changed: bool,
+    /// The key list's pick, not staged yet: amber, as on the board.
+    pub(super) preview: bool,
 }
 
 /// Bars across the top and bottom of the screen.
@@ -355,7 +380,7 @@ fn fill_line(left: &[Seg], right: &[Seg], cols: usize, bg: Rgb) -> String {
     take_visible(&line, cols)
 }
 
-/// ` lazyvial  board  L1 L2 Tap Dance  ...  ● 2 unsaved  ● ready `.
+/// ` lazyvial  board  L0 L1 Tap Dance  ...  ● 2 unsaved  ● ready `.
 /// Tabs farthest from the active one drop first when the line is too narrow.
 fn header_line(header: &Header, cols: usize) -> String {
     let mut left = vec![
@@ -464,27 +489,29 @@ pub(super) struct Detail {
 }
 
 pub(super) fn render_board(
-    layer_one_based: u8,
+    layer: u8,
     layer_count: u8,
     caps: &[Cap],
     detail: Option<&Detail>,
     frame: Frame<'_>,
 ) -> String {
-    let title = format!("layer {layer_one_based}/{layer_count}");
+    let title = format!("layer {layer}/{layer_count}");
     let selected = caps
         .iter()
         .find(|cap| cap.selected && !cap.legend.is_empty())
         .map(|cap| {
-            let at = match cap.place {
-                Some(Place::Matrix { row, col }) => format!("  ·  key {row},{col}"),
-                Some(Place::Encoder { index, direction }) => {
-                    let turn = if direction == 0 { "cw" } else { "ccw" };
-                    format!("  ·  encoder {index} {turn}")
-                }
-                None => String::new(),
+            let at = cap
+                .place
+                .map(|place| format!("  ·  {place}"))
+                .unwrap_or_default();
+            let mut status = match &cap.was {
+                Some(was) => vec![
+                    seg(format!("{was} → {}", cap.legend), BAR, UNLOCK, true),
+                    seg("  ·  enter to stage", BAR, DIM, false),
+                ],
+                None => vec![seg(format!("selected {}", cap.legend), BAR, TEXT, true)],
             };
-            let mut status = vec![seg(format!("selected {}", cap.legend), BAR, TEXT, true)];
-            if cap.changed {
+            if cap.changed && cap.was.is_none() {
                 status.push(seg("  ·  unsaved", BAR, CHANGED, false));
             }
             status.push(seg(at, BAR, DIM, false));
@@ -518,7 +545,7 @@ fn detail_lines(detail: &Detail, width: usize) -> Vec<String> {
     if detail.layers.len() > 1 {
         let mut row = dye("on each layer  ", DIM, false);
         for (index, (legend, here, changed)) in detail.layers.iter().enumerate() {
-            let name = format!("L{} ", index + 1);
+            let name = format!("L{index} ");
             let chip = format!(" {legend} ");
             if *here {
                 row.push_str(&dye(&name, TEXT, true));
@@ -554,6 +581,19 @@ pub(super) fn render_sheet(sheet: &Sheet, frame: Frame<'_>) -> String {
             title: &sheet.title,
             status: vec![seg(sheet.status.clone(), BAR, TEXT, false)],
             body: Body::Sheet(sheet),
+        },
+        frame,
+    )
+}
+
+/// An editor tab the background read has not brought in yet. It names the part being read and
+/// no count, so it repaints only when the part changes, as the header does.
+pub(super) fn render_reading(title: &str, part: &str, frame: Frame<'_>) -> String {
+    compose(
+        Top {
+            title,
+            status: vec![seg("reading from the keyboard…", BAR, TEXT, false)],
+            body: Body::Reading(part),
         },
         frame,
     )
@@ -610,6 +650,7 @@ struct Top<'a> {
 enum Body<'a> {
     Keys(&'a [Cap], Option<&'a Detail>),
     Sheet(&'a Sheet),
+    Reading(&'a str),
     Pick {
         boards: &'a [super::Candidate],
         cursor: usize,
@@ -700,6 +741,7 @@ fn compose(top: Top<'_>, frame: Frame<'_>) -> String {
     let key_lines = match &top.body {
         Body::Keys(caps, _) => paint_rows(caps, cols).len(),
         Body::Pick { boards, .. } => (boards.len() * 3).saturating_sub(1),
+        Body::Reading(_) => 3,
         // A sheet scrolls, so it takes what is left after the bars and borders, at least two lines.
         Body::Sheet(sheet) => {
             let around = 3 + usize::from(!footer.is_empty()) + if lower.is_some() { 6 } else { 0 };
@@ -781,6 +823,24 @@ fn board_body(body: &Body<'_>, spent: &Spend, key_cols: u16, key_lines: usize) -
         Body::Sheet(sheet) => {
             out.extend(sheet_lines(sheet, key_lines, usize::from(key_cols)));
             out.extend(std::iter::repeat_n(String::new(), spent.board_pad));
+        }
+        Body::Reading(part) => {
+            let lines = [
+                dye("lazyvial is still reading this keyboard", TEXT, true),
+                dye(&format!("◌ now {part}"), SELECTED_BG, true),
+                dye(
+                    "this tab fills in once it is read · the keymap works meanwhile",
+                    DIM,
+                    false,
+                ),
+            ];
+            let above = spent.board_pad / 2;
+            out.extend(std::iter::repeat_n(String::new(), above));
+            for line in lines {
+                let indent = usize::from(key_cols).saturating_sub(visible_len(&line)) / 2;
+                out.push(format!("{}{line}", " ".repeat(indent)));
+            }
+            out.extend(std::iter::repeat_n(String::new(), spent.board_pad - above));
         }
         Body::Pick {
             boards,
@@ -882,13 +942,15 @@ fn sheet_lines(sheet: &Sheet, room: usize, width: usize) -> Vec<String> {
 
 fn sheet_chip(cell: &SheetCell, width: usize, on: bool) -> String {
     let text: String = cell.text.chars().take(width.saturating_sub(2)).collect();
-    let (bg, fg) = if on {
+    let (bg, fg) = if cell.preview {
+        (UNLOCK, SELECTED_FG)
+    } else if on {
         (SELECTED_BG, SELECTED_FG)
     } else {
         let (bg, fg) = tone_colors(cell.tone);
         (bg, if cell.changed { CHANGED } else { fg })
     };
-    fill(&text, width, bg, fg, on || cell.changed)
+    fill(&text, width, bg, fg, on || cell.changed || cell.preview)
 }
 
 /// First index of a `room`-long window over `len` items that keeps `cursor` near the middle.
@@ -908,7 +970,26 @@ fn lower_title<'a>(lower: &Lower<'a>) -> &'a str {
 fn lower_body(lower: &Lower<'_>, room: usize, width: u16) -> Vec<String> {
     let width = usize::from(width);
     match lower {
-        Lower::Search { hits, cursor, .. } => search_grid(hits, *cursor, room, width),
+        Lower::Search {
+            query,
+            hits,
+            cursor,
+            ..
+        } => {
+            // The query line, as in the find list: typing searches every group.
+            let block = dye_bg(" ", SELECTED_FG, SELECTED_BG);
+            let line = if query.is_empty() {
+                format!(
+                    " › {block} {}",
+                    dye("type to search every group", DIM, false)
+                )
+            } else {
+                format!(" › {query}{block}")
+            };
+            let mut out = vec![line];
+            out.extend(search_grid(hits, *cursor, room.saturating_sub(1), width));
+            out
+        }
         Lower::Edit { text, .. } => {
             vec![format!(
                 " > {text}{}",
@@ -991,15 +1072,8 @@ fn pick_cards(
     out
 }
 
-/// Hits run down a column, then into the next, so Up and Down still walk the list in order.
-/// The window slides by whole columns and keeps the cursor's column near the middle.
-fn search_grid(hits: &[Found], cursor: usize, room: usize, width: usize) -> Vec<String> {
-    if room == 0 {
-        return Vec::new();
-    }
-    if hits.is_empty() {
-        return vec![dye("   no match", DIM, false)];
-    }
+/// Column widths of the key grid: `(legend, QMK name, whole cell)`.
+fn grid_cell(hits: &[Found]) -> (usize, usize, usize) {
     let legend_w = hits
         .iter()
         .map(|hit| hit.legend.chars().count())
@@ -1014,22 +1088,37 @@ fn search_grid(hits: &[Found], cursor: usize, room: usize, width: usize) -> Vec<
         .unwrap_or(0)
         .min(20);
     let cell = 3 + legend_w + if token_w > 0 { 2 + token_w } else { 0 } + 2;
+    (legend_w, token_w, cell)
+}
+
+/// Hits per row of the key grid on a screen `cols` wide, inside the panel's side borders.
+/// The session moves Up and Down by this, so the keys and the drawing agree.
+// ponytail: assumes the boxed panel; on a screen too short for borders the grid is two cells
+// wider than this and Up/Down land one row-width off.
+pub(in crate::session) fn search_across(hits: &[Found], cols: u16) -> usize {
+    (usize::from(cols).saturating_sub(2) / grid_cell(hits).2).max(1)
+}
+
+/// Hits run along a row, then onto the next, so Left and Right step to the neighbour and Up and
+/// Down move a whole row. The window slides by whole rows and keeps the cursor's row in the middle.
+fn search_grid(hits: &[Found], cursor: usize, room: usize, width: usize) -> Vec<String> {
+    if room == 0 {
+        return Vec::new();
+    }
+    if hits.is_empty() {
+        return vec![dye("   no match", DIM, false)];
+    }
+    let (legend_w, token_w, cell) = grid_cell(hits);
     let across = (width / cell).max(1);
-    let down = room.min(hits.len());
-    let columns = hits.len().div_ceil(down);
+    let rows = hits.len().div_ceil(across);
+    let down = room.min(rows);
     let cursor = cursor.min(hits.len() - 1);
-    let first = if columns <= across {
-        0
-    } else {
-        (cursor / down)
-            .saturating_sub(across / 2)
-            .min(columns - across)
-    };
-    (0..down)
+    let first = (cursor / across).saturating_sub(down / 2).min(rows - down);
+    (first..first + down)
         .map(|row| {
-            (first..columns.min(first + across))
+            (0..across)
                 .filter_map(|column| {
-                    let index = column * down + row;
+                    let index = row * across + column;
                     hits.get(index)
                         .map(|hit| hit_cell(hit, index == cursor, legend_w, token_w, cell))
                 })
@@ -1273,6 +1362,10 @@ const UNLOCK: Rgb = Rgb(224, 175, 104);
 const CHANGED: Rgb = Rgb(158, 206, 106);
 
 fn colors(cap: &Cap) -> (Rgb, Rgb, Rgb) {
+    // A preview is about to change: amber, as a question that waits.
+    if cap.was.is_some() {
+        return (UNLOCK, SELECTED_FG, SELECTED_FG);
+    }
     if cap.selected {
         return (SELECTED_BG, SELECTED_FG, SELECTED_FG);
     }
@@ -1456,7 +1549,7 @@ fn cover(frame: &str, popup: Option<&Popup>, cols: u16, rows: u16) -> String {
         return frame.to_string();
     }
     let boxed = popup_box(popup, cols, rows);
-    stamp(frame, &boxed, cols, rows)
+    stamp(frame, &boxed, cols, rows, popup.pinned)
 }
 
 /// Blank columns between each side bar and the text.
@@ -1666,8 +1759,9 @@ struct Cell {
     style: String,
 }
 
-/// Dims the frame, then lays `popup` in the middle with a shadow right and below it.
-fn stamp(frame: &str, popup: &[Vec<Cell>], cols: usize, rows: usize) -> String {
+/// Dims the frame, then lays `popup` in the middle, or near the top when `pinned`, with a
+/// shadow right and below it.
+fn stamp(frame: &str, popup: &[Vec<Cell>], cols: usize, rows: usize, pinned: bool) -> String {
     let mut grid: Vec<Vec<Cell>> = frame.split('\n').map(cells_of).collect();
     grid.truncate(rows);
     while grid.len() < rows {
@@ -1685,7 +1779,12 @@ fn stamp(frame: &str, popup: &[Vec<Cell>], cols: usize, rows: usize) -> String {
     }
     let box_h = popup.len();
     let box_w = popup.iter().map(Vec::len).max().unwrap_or(0);
-    let top = rows.saturating_sub(box_h) / 2;
+    // Pinned: under the header and the panel's top border, with one row to spare.
+    let top = if pinned {
+        3.min(rows.saturating_sub(box_h))
+    } else {
+        rows.saturating_sub(box_h) / 2
+    };
     let left = cols.saturating_sub(box_w) / 2;
     let shadow = format!(
         "\u{1b}[38;2;40;44;56;48;2;{};{};{}m",
@@ -2051,6 +2150,7 @@ mod tests {
             legend: legend.to_string(),
             selected,
             unlock: false,
+            was: None,
             changed: false,
             decal: false,
             tone,

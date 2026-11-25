@@ -13,9 +13,6 @@ fn remap_persists() -> lazyvial::Result<()> {
     app.handle(lazyvial::Event::Char('s'))?;
     app.handle(lazyvial::Event::Char('c'))?;
     app.handle(lazyvial::Event::Confirm)?;
-    assert!(app.screen().text().contains("stage this change?"));
-    assert!(app.screen().text().contains("Esc"));
-    app.handle(lazyvial::Event::Confirm)?;
     assert!(app.screen().text().contains("1 unsaved"));
     app.handle(lazyvial::Event::Char(':'))?;
     app.handle(lazyvial::Event::Char('w'))?;
@@ -44,7 +41,6 @@ fn hold_marks_the_unlock_keys_on_a_full_board() -> lazyvial::Result<()> {
         lazyvial::Event::Char('o'),
         lazyvial::Event::Char('o'),
         lazyvial::Event::Char('t'),
-        lazyvial::Event::Confirm,
         lazyvial::Event::Confirm,
         lazyvial::Event::Char(':'),
         lazyvial::Event::Char('w'),
@@ -97,7 +93,7 @@ fn pick_when_two() -> lazyvial::Result<()> {
     app.handle(lazyvial::Event::Right)?;
     assert!(on(&app, "beta"));
     app.handle(lazyvial::Event::Confirm)?;
-    assert!(app.screen().text().contains("layer 1/"));
+    assert!(app.screen().text().contains("layer 0/"));
     assert!(app.screen().text().contains("beta"));
     Ok(())
 }
@@ -117,13 +113,20 @@ fn keymap_opens_before_tap_dances_arrive() -> lazyvial::Result<()> {
         lazyvial::Step::Working
     );
     let text = app.screen().text();
-    assert!(text.contains("layer 1/"), "{text}");
+    assert!(text.contains("layer 0/"), "{text}");
     assert!(text.contains("reading tap dances"), "{text}");
-    assert!(!text.contains("Tap Dance "), "{text}");
+    assert!(text.contains("Tap Dance…"), "{text}");
+    // Its tab is there already, and says it is still being read. Edit keys do nothing yet.
+    app.handle(lazyvial::Event::Tab)?;
+    app.handle(lazyvial::Event::Char('x'))?;
+    app.handle(lazyvial::Event::Confirm)?;
+    let text = app.screen().text();
+    assert!(text.contains("lazyvial is still reading"), "{text}");
+    assert!(text.contains("◌ now tap dances"), "{text}");
     assert_eq!(app.handle(lazyvial::Event::Tick)?, lazyvial::Step::Continue);
     let text = app.screen().text();
     assert!(!text.contains("reading"), "{text}");
-    assert!(text.contains("Tap Dance"), "{text}");
+    assert!(text.contains("tap dance 1/4"), "{text}");
     Ok(())
 }
 
@@ -133,7 +136,6 @@ fn encoder_writes_clockwise() -> lazyvial::Result<()> {
     let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 8));
     app.handle(lazyvial::Event::Char('/'))?;
     app.handle(lazyvial::Event::Char('a'))?;
-    app.handle(lazyvial::Event::Confirm)?;
     app.handle(lazyvial::Event::Confirm)?;
     assert!(app.screen().text().contains('▌'));
     assert!(
@@ -221,13 +223,81 @@ fn tap_dance_shows_up_in_search() -> lazyvial::Result<()> {
         "{}",
         app.screen().text()
     );
+    // Right walks the hits in reading order.
     for _ in 0..25 {
-        app.handle(lazyvial::Event::Down)?;
+        app.handle(lazyvial::Event::Right)?;
     }
     assert!(
         app.screen().text().contains("> TD(25)"),
         "{}",
         app.screen().text()
+    );
+    Ok(())
+}
+
+#[test]
+fn key_grid_moves_by_what_is_drawn_and_closes_without_esc() -> lazyvial::Result<()> {
+    let board = lazyvial::MemoryBoard::from_definition(
+        r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
+    )?;
+    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(100, 24));
+    // Where the highlighted hit is drawn: (line, column) of its `>` marker.
+    let marker = |app: &lazyvial::App<lazyvial::TestScreen>| {
+        let mut plain = String::new();
+        let mut escape = false;
+        for ch in app.screen().text().chars() {
+            match ch {
+                '\u{1b}' => escape = true,
+                'm' if escape => escape = false,
+                _ if escape => {}
+                _ => plain.push(ch),
+            }
+        }
+        plain
+            .lines()
+            .enumerate()
+            .find_map(|(row, line)| line.find(" > ").map(|at| (row, line[..at].chars().count())))
+            .expect("a highlighted hit")
+    };
+    app.handle(lazyvial::Event::Char('/'))?;
+    let start = marker(&app);
+    // Down lands right under it, Right right beside it, and back again.
+    app.handle(lazyvial::Event::Down)?;
+    let below = marker(&app);
+    assert_eq!((below.0, below.1), (start.0 + 1, start.1));
+    app.handle(lazyvial::Event::Up)?;
+    app.handle(lazyvial::Event::Right)?;
+    let beside = marker(&app);
+    assert!(
+        beside.0 == start.0 && beside.1 > start.1,
+        "{beside:?} {start:?}"
+    );
+    // Backspace with nothing typed closes the list, for a keyboard without Esc.
+    app.handle(lazyvial::Event::Backspace)?;
+    assert!(!app.screen().text().contains("[Basic]"));
+    Ok(())
+}
+
+#[test]
+fn key_list_previews_the_pick_on_the_key_and_esc_leaves_nothing() -> lazyvial::Result<()> {
+    let board = lazyvial::MemoryBoard::from_definition(
+        r#"{"matrix":{"rows":1,"cols":1},"layouts":{"keymap":[["0,0"]]}}"#,
+    )?;
+    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(100, 24));
+    app.handle(lazyvial::Event::Char('/'))?;
+    for ch in "esc".chars() {
+        app.handle(lazyvial::Event::Char(ch))?;
+    }
+    // Before Enter, the key shows the pick and the status says what changes.
+    let text = app.screen().text();
+    assert!(text.contains("NO → Esc"), "{text}");
+    assert!(text.contains("› esc"), "{text}");
+    // Esc drops the preview; nothing was staged.
+    app.handle(lazyvial::Event::Cancel)?;
+    let text = app.screen().text();
+    assert!(
+        text.contains("selected NO") && !text.contains("unsaved"),
+        "{text}"
     );
     Ok(())
 }
@@ -244,7 +314,6 @@ fn enter_opens_the_catalog() -> lazyvial::Result<()> {
     assert!(text.contains("> NO"), "{text}");
     app.handle(lazyvial::Event::Down)?;
     app.handle(lazyvial::Event::Confirm)?;
-    app.handle(lazyvial::Event::Confirm)?;
     assert!(
         app.screen().text().contains("selected TRNS"),
         "{}",
@@ -259,7 +328,6 @@ fn enter_opens_the_catalog() -> lazyvial::Result<()> {
     app.handle(lazyvial::Event::Char('e'))?;
     app.handle(lazyvial::Event::Char('s'))?;
     app.handle(lazyvial::Event::Char('c'))?;
-    app.handle(lazyvial::Event::Confirm)?;
     app.handle(lazyvial::Event::Confirm)?;
     assert!(
         app.screen().text().contains("selected Esc"),
@@ -345,7 +413,6 @@ fn layer_key_keeps_its_color() -> lazyvial::Result<()> {
         "{}",
         app.screen().text()
     );
-    app.handle(lazyvial::Event::Confirm)?;
     app.handle(lazyvial::Event::Confirm)?;
     app.handle(lazyvial::Event::Right)?;
     let text = app.screen().text();
@@ -438,25 +505,25 @@ fn shelves_switch_and_typing_searches() -> lazyvial::Result<()> {
         lazyvial::TestScreen::new(40, 16),
     );
     app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazyvial::Event::Tab)?;
     let iso = app.screen().text();
     assert!(iso.contains("[ISO/JIS]"), "{iso}");
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazyvial::Event::Tab)?;
     let layers = app.screen().text();
     assert!(layers.contains("[Layers]"), "{layers}");
     assert!(layers.contains("> Layer Lock"), "{layers}");
-    app.handle(lazyvial::Event::Right)?;
+    app.handle(lazyvial::Event::Tab)?;
     let quantum = app.screen().text();
     assert!(quantum.contains("[Quantum]"), "{quantum}");
     assert!(quantum.contains("> Boot"), "{quantum}");
     for _ in 0..4 {
-        app.handle(lazyvial::Event::Left)?;
+        app.handle(lazyvial::Event::BackTab)?;
     }
     let macros = app.screen().text();
     assert!(macros.contains("[Macro]"), "{macros}");
     assert!(macros.contains("> M0"), "{macros}");
-    app.handle(lazyvial::Event::Left)?;
-    app.handle(lazyvial::Event::Left)?;
+    app.handle(lazyvial::Event::BackTab)?;
+    app.handle(lazyvial::Event::BackTab)?;
     let dance = app.screen().text();
     assert!(dance.contains("[Tap Dance]"), "{dance}");
     assert!(dance.contains("> TD(0)"), "{dance}");
@@ -471,9 +538,9 @@ fn shelves_switch_and_typing_searches() -> lazyvial::Result<()> {
     )?;
     let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(40, 16));
     app.handle(lazyvial::Event::Char('/'))?;
-    app.handle(lazyvial::Event::Left)?;
-    app.handle(lazyvial::Event::Left)?;
-    app.handle(lazyvial::Event::Left)?;
+    app.handle(lazyvial::Event::BackTab)?;
+    app.handle(lazyvial::Event::BackTab)?;
+    app.handle(lazyvial::Event::BackTab)?;
     let text = app.screen().text();
     assert!(text.contains("[App, Media and Mouse]"), "{text}");
     Ok(())
@@ -504,7 +571,6 @@ fn kc_code_takes_a_basic_key() -> lazyvial::Result<()> {
     for ch in "esc".chars() {
         app.handle(lazyvial::Event::Char(ch))?;
     }
-    app.handle(lazyvial::Event::Confirm)?;
     app.handle(lazyvial::Event::Confirm)?;
     let text = app.screen().text();
     assert!(text.contains("selected L1(Esc)"), "{text}");
@@ -598,11 +664,50 @@ fn layers_wrap_with_brackets() -> lazyvial::Result<()> {
     let board =
         lazyvial::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?.layers(2);
     let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(60, 16));
-    assert!(app.screen().text().contains("layer 1/"));
+    assert!(app.screen().text().contains("layer 0/"));
     app.handle(lazyvial::Event::Char(']'))?;
-    assert!(app.screen().text().contains("layer 2/"));
-    app.handle(lazyvial::Event::Char('['))?;
     assert!(app.screen().text().contains("layer 1/"));
+    app.handle(lazyvial::Event::Char('['))?;
+    assert!(app.screen().text().contains("layer 0/"));
+    Ok(())
+}
+
+#[test]
+fn ctrl_k_finds_a_key_on_another_layer_and_runs_commands() -> lazyvial::Result<()> {
+    use lazyvial::Event;
+    let board =
+        lazyvial::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?.layers(2);
+    let mut app = lazyvial::App::new(board.open()?, lazyvial::TestScreen::new(110, 34));
+    // Esc on layer 1, then back to layer 0.
+    app.handle(Event::Char(']'))?;
+    for event in [
+        Event::Char('/'),
+        Event::Char('e'),
+        Event::Char('s'),
+        Event::Char('c'),
+    ] {
+        app.handle(event)?;
+    }
+    app.handle(Event::Confirm)?;
+    app.handle(Event::Char('['))?;
+    assert!(app.screen().text().contains("layer 0/"));
+    app.handle(Event::Char(' '))?;
+    for ch in "esc l1".chars() {
+        app.handle(Event::Char(ch))?;
+    }
+    app.handle(Event::Confirm)?;
+    let text = app.screen().text();
+    assert!(text.contains("layer 1/"), "{text}");
+    assert!(text.contains("selected Esc"), "{text}");
+    // A command runs as if typed after `:`.
+    app.handle(Event::Palette)?;
+    for ch in "undo".chars() {
+        app.handle(Event::Char(ch))?;
+    }
+    app.handle(Event::Confirm)?;
+    let text = app.screen().text();
+    assert!(!text.contains("unsaved"), "{text}");
+    assert!(!text.contains("find anything"), "{text}");
     Ok(())
 }
 

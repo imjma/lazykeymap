@@ -280,11 +280,10 @@ pub(super) fn token(table: &Table, code: u16) -> Option<String> {
 }
 
 /// What a keycode does, in a few words. Ranges are QMK's, as in `compose` and `tone`.
-/// QMK counts layers from 0, as the legends do (`MO(1)`); the tabs count from 1 (`L2`).
-/// Both are named, so `MO(1)` reads `layer 1 (tab L2) while held`.
+/// Layers count from 0, as QMK, the legends (`MO(1)`), and the tabs (`L1`) do.
 pub(super) fn kind(code: u16) -> String {
     let tap = code & 0xFF;
-    let layer = |bits: u16| format!("layer {bits} (tab L{})", bits + 1);
+    let layer = |bits: u16| format!("layer {bits}");
     match code {
         0x0000 => "does nothing".to_string(),
         0x0001 => "transparent: uses the layer below".to_string(),

@@ -9,7 +9,7 @@ mod entries;
 mod keycodes;
 pub(super) use catalog::{Listed, Range};
 pub(super) use entries::{Action, Combo, Spot, Tab, TapDance, MAX_DELAY};
-pub(super) use layout::{Lower, Mode, ModeTone, Popup, PopupLine};
+pub(super) use layout::{search_across, Lower, Mode, ModeTone, Popup, PopupLine};
 mod layout;
 
 use catalog::{Features, Table};
@@ -1612,6 +1612,21 @@ pub(super) enum Dir {
 
 pub(in crate::session) use layout::Place;
 
+/// Where a Ctrl-K hit lands: a key on a layer, or a tap dance, combo, or macro row.
+#[derive(Clone, Copy)]
+pub(super) enum Jump {
+    Key { layer: u8, place: Place },
+    Spot(Spot),
+}
+
+/// What Enter in the key list would stage, drawn in amber where it lands.
+pub(super) enum Preview {
+    /// The selected key, or a tap dance or combo key cell, becomes this code.
+    Code(u16),
+    /// The macro step under the cursor becomes this step, or with `insert` goes in before it.
+    Step { action: Action, insert: bool },
+}
+
 /// One pending change. `Board::commit` is the only function that sends any of them.
 #[derive(Clone, PartialEq)]
 pub(in crate::session) enum Write {
@@ -1845,19 +1860,78 @@ impl Board {
         catalog::legend(&self.catalog, code)
     }
 
-    /// Each editor the board has entries for, after the layer tabs.
+    /// What Ctrl-K finds on the board, as `(where, label, more words it matches)`: every key on
+    /// every layer that does something, then every tap dance, combo, and macro once they are read.
+    pub(super) fn jumps(&self) -> Vec<(Jump, String, String)> {
+        let targets = self.targets();
+        let mut out = Vec::new();
+        for layer in 0..self.layer_count() {
+            for target in &targets {
+                let code = self.code_at(layer, target.place).unwrap_or(0);
+                // KC_NO and KC_TRNS fill most layers and would bury every other hit.
+                if code <= 1 {
+                    continue;
+                }
+                out.push((
+                    Jump::Key {
+                        layer,
+                        place: target.place,
+                    },
+                    format!("{}  ·  L{layer} {}", self.legend(code), target.place),
+                    catalog::token(&self.catalog, code).unwrap_or_default(),
+                ));
+            }
+        }
+        if self.rest.is_some() {
+            return out;
+        }
+        for tab in self.editors() {
+            let rows = self
+                .sheet(Spot {
+                    tab,
+                    row: 0,
+                    col: 0,
+                })
+                .rows;
+            for (row, (label, cells)) in rows.into_iter().enumerate() {
+                let what: Vec<&str> = cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .filter(|text| *text != "NO")
+                    .collect();
+                out.push((
+                    Jump::Spot(Spot { tab, row, col: 0 }),
+                    format!("{label}  ·  {}", what.join(" ")),
+                    tab.name().to_string(),
+                ));
+            }
+        }
+        out
+    }
+
+    /// Each editor the board has entries for, after the layer tabs. While the background read
+    /// runs, the counts it already has stand in for the entries, so the tabs are there from the start.
     pub(super) fn editors(&self) -> Vec<Tab> {
-        let mut tabs = Vec::new();
-        if !self.entries.tap_dances.is_empty() {
-            tabs.push(Tab::TapDance);
-        }
-        if !self.entries.combos.is_empty() {
-            tabs.push(Tab::Combos);
-        }
-        if !self.entries.macros.is_empty() {
-            tabs.push(Tab::Macros);
-        }
-        tabs
+        let (tap_dances, combos, macros) = match &self.rest {
+            Some(load) => (
+                load.tap_dance > 0,
+                load.combo > 0,
+                load.version >= 2 && load.macros > 0,
+            ),
+            None => (
+                !self.entries.tap_dances.is_empty(),
+                !self.entries.combos.is_empty(),
+                !self.entries.macros.is_empty(),
+            ),
+        };
+        [
+            (tap_dances, Tab::TapDance),
+            (combos, Tab::Combos),
+            (macros, Tab::Macros),
+        ]
+        .into_iter()
+        .filter_map(|(shown, tab)| shown.then_some(tab))
+        .collect()
     }
 
     fn hold_names(&self, layer: u8, pairs: &[(u8, u8)]) -> String {
@@ -1961,7 +2035,20 @@ impl Board {
     pub(super) fn text(&self, paint: &Paint<'_>) -> String {
         let frame = self.frame(paint);
         if let Some(spot) = paint.spot {
-            return layout::render_sheet(&self.sheet(spot), frame);
+            return match self.reading() {
+                Some(part) => layout::render_reading(&spot.tab.name().to_lowercase(), part, frame),
+                None => {
+                    let mut sheet = self.sheet(spot);
+                    if let Some(Lower::Search {
+                        preview: Some(preview),
+                        ..
+                    }) = &paint.lower
+                    {
+                        self.preview_cell(&mut sheet, spot, preview);
+                    }
+                    layout::render_sheet(&sheet, frame)
+                }
+            };
         }
         let mut caps = Vec::new();
         for keys in &self.def.rows {
@@ -1988,10 +2075,24 @@ impl Board {
                     Tone::Key
                 };
                 let (x, _) = layout::world_point(key, key.x, key.y);
+                let selected = place.is_some() && paint.selection == place;
+                // The key list's highlighted code, on the key it would change.
+                let preview = match &paint.lower {
+                    Some(Lower::Search {
+                        preview: Some(Preview::Code(code)),
+                        ..
+                    }) if selected => Some(*code),
+                    _ => None,
+                };
+                let (legend, was) = match preview {
+                    Some(code) => (catalog::legend(&self.catalog, code), Some(legend)),
+                    None => (legend, None),
+                };
                 caps.push(Cap {
                     place,
                     legend,
-                    selected: place.is_some() && paint.selection == place,
+                    was,
+                    selected,
                     unlock: paint.hold.is_some()
                         && self.locked
                         && matches!(place, Some(Place::Matrix { row, col }) if self.unlock.contains(&(row, col))),
@@ -2009,7 +2110,7 @@ impl Board {
         }
         let detail = paint.selection.map(|place| self.detail(paint.layer, place));
         layout::render_board(
-            paint.layer.saturating_add(1),
+            paint.layer,
             self.layer_count(),
             &caps,
             detail.as_ref(),
@@ -2040,12 +2141,14 @@ impl Board {
         }
     }
 
-    /// The header holds the tabs (`L1`.. then the editors), the lock state, and the unsaved count.
+    /// The header holds the tabs (`L0`.. then the editors), the lock state, and the unsaved count.
     fn frame<'a>(&self, paint: &Paint<'a>) -> layout::Frame<'a> {
         let editors = self.editors();
         let layers = usize::from(self.layer_count());
-        let mut tabs: Vec<String> = (1..=layers).map(|n| format!("L{n}")).collect();
-        tabs.extend(editors.iter().map(|tab| tab.name().to_string()));
+        let mut tabs: Vec<String> = (0..layers).map(|n| format!("L{n}")).collect();
+        // An editor still being read is marked, as `Combos…`.
+        let unread = if self.rest.is_some() { "…" } else { "" };
+        tabs.extend(editors.iter().map(|tab| format!("{}{unread}", tab.name())));
         let active = match paint.spot {
             Some(spot) => layers + editors.iter().position(|tab| *tab == spot.tab).unwrap_or(0),
             None => usize::from(paint.layer),
@@ -2085,6 +2188,7 @@ impl Board {
             text: self.legend(code),
             tone: catalog::tone(code),
             changed,
+            preview: false,
         };
         let (header, rows): (Vec<&'static str>, Vec<(String, Vec<SheetCell>)>) = match spot.tab {
             Tab::TapDance => (
@@ -2102,6 +2206,7 @@ impl Board {
                             text: format!("{} ms", entry.term),
                             tone: Tone::Key,
                             changed: entry.term != saved.term,
+                            preview: false,
                         });
                         (format!("TD({index})"), cells)
                     })
@@ -2146,6 +2251,7 @@ impl Board {
                             text: "+".to_string(),
                             tone: Tone::Trans,
                             changed: false,
+                            preview: false,
                         });
                         (format!("M{index}"), cells)
                     })
@@ -2181,7 +2287,45 @@ impl Board {
             text,
             tone,
             changed: false,
+            preview: false,
         }
+    }
+
+    /// Draws the key list's pick into the sheet in amber where it lands, and says on the status
+    /// line what it changes. An insert goes in before the cursor; the cursor then sits on it.
+    fn preview_cell(&self, sheet: &mut layout::Sheet, spot: Spot, preview: &Preview) {
+        let Some((_, cells)) = sheet.rows.get_mut(spot.row) else {
+            return;
+        };
+        let (cell, insert) = match preview {
+            Preview::Code(code) => (
+                SheetCell {
+                    text: self.legend(*code),
+                    tone: catalog::tone(*code),
+                    changed: false,
+                    preview: true,
+                },
+                false,
+            ),
+            Preview::Step { action, insert } => (
+                SheetCell {
+                    preview: true,
+                    ..self.action_cell(action)
+                },
+                *insert,
+            ),
+        };
+        let now = cell.text.clone();
+        let was = if insert {
+            cells.insert(spot.col.min(cells.len()), cell);
+            "new step".to_string()
+        } else {
+            match cells.get_mut(spot.col) {
+                Some(old) => std::mem::replace(old, cell).text,
+                None => return,
+            }
+        };
+        sheet.status = format!("{was} → {now}  ·  enter to stage");
     }
 
     fn spot_status(
@@ -2423,20 +2567,14 @@ impl Board {
         };
         match write {
             Write::Key { layer, place, code } => {
-                let at = match place {
-                    Place::Matrix { row, col } => format!("key {row},{col}"),
-                    Place::Encoder { index, direction } => {
-                        let turn = if *direction == 0 { "cw" } else { "ccw" };
-                        format!("encoder {index} {turn}")
-                    }
-                };
+                let at = place.to_string();
                 let was = if from_saved {
                     self.saved_code_at(*layer, *place)
                 } else {
                     self.code_at(*layer, *place)
                 };
                 vec![
-                    PopupLine::Heading(format!("layer {} {at}", layer + 1)),
+                    PopupLine::Heading(format!("layer {layer} {at}")),
                     change(self.legend(was.unwrap_or(0)), self.legend(*code)),
                 ]
             }
@@ -2736,13 +2874,13 @@ mod tests {
         let text = plain(&model.text(60, 12));
         assert!(text.contains("opening…"), "{text}");
         assert!(text.contains('▰') && text.contains("layout"), "{text}");
-        model.handle(crate::Event::Cancel).unwrap();
+        model.handle(crate::Event::Cancel, 60).unwrap();
         let text = plain(&model.text(60, 12));
         assert!(text.contains("stopped opening"), "{text}");
         assert!(text.contains("▌ slow"), "{text}");
         // The same board opens from the start again.
-        model.handle(crate::Event::Confirm).unwrap();
-        assert!(model.text(60, 12).contains("layer 1/"));
+        model.handle(crate::Event::Confirm, 60).unwrap();
+        assert!(model.text(60, 12).contains("layer 0/"));
     }
 
     #[test]
@@ -2773,10 +2911,6 @@ mod tests {
         for ch in "boot".chars() {
             app.handle(crate::Event::Char(ch)).unwrap();
         }
-        app.handle(crate::Event::Confirm).unwrap();
-        let text = plain(app.screen().text());
-        assert!(text.contains("╭─ stage this change?"), "{text}");
-        assert!(text.contains("NO  →  Boot"), "{text}");
         app.handle(crate::Event::Confirm).unwrap();
         // Staged only: the keyboard has nothing yet.
         assert_eq!(board.store.borrow().matrix[0], 0);

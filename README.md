@@ -35,6 +35,7 @@ Plug in a Vial keyboard and run `lazyvial`. Pick the keyboard, then:
 | `:w` | write every change to the keyboard |
 | `:wq`, `:q`, `:q!`, `:e!` | write and quit, quit, quit without writing, discard changes |
 | `?` | every key, for the screen you are on |
+| `space` or `ctrl-k` | find anything: run a command, go to a layer or tab, or find a key on any layer by name. `:` opens the same list showing only commands |
 
 Changes stay in a draft, shown in green, until `:w`. Quitting with unsaved changes asks first. A locked keyboard asks you to hold its unlock keys only when a change needs it: the bootloader key, or macros.
 

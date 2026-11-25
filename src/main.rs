@@ -100,6 +100,7 @@ fn map_key(key: KeyEvent) -> Event {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Event::Quit,
+            KeyCode::Char('k') => Event::Palette,
             KeyCode::Char('u') => Event::PageUp,
             KeyCode::Char('d') => Event::PageDown,
             KeyCode::Char('p') => Event::Up,
