@@ -299,23 +299,33 @@ fn found(entry: &Entry) -> Found {
     }
 }
 
+/// Hits by how they match: the legend itself (`k` is `K`), a legend that starts with it, then
+/// the QMK name without its `KC_` or `QK_` (`kp` is `KC_KP_…`), then anywhere. Every QMK name
+/// starts with `KC_`, so a bare `k` would otherwise rank every key alike.
 fn rank(table: &Table, query: &str) -> Vec<Found> {
     let query = query.to_lowercase();
     let mut ranked = Vec::new();
     for (index, entry) in table.entries.iter().enumerate() {
         let legend = entry.legend.to_lowercase();
         let token = entry.token.to_lowercase();
-        let prefix = legend.starts_with(&query) || token.starts_with(&query);
-        let inside = legend.contains(&query) || token.contains(&query);
-        if !prefix && !inside {
+        let bare = token
+            .strip_prefix("kc_")
+            .or_else(|| token.strip_prefix("qk_"))
+            .unwrap_or(&token);
+        let tier = if legend == query {
+            0u8
+        } else if legend.starts_with(&query) {
+            1
+        } else if bare == query || token == query {
+            2
+        } else if bare.starts_with(&query) || token.starts_with(&query) {
+            3
+        } else if legend.contains(&query) || token.contains(&query) {
+            4
+        } else {
             continue;
-        }
-        ranked.push((
-            if prefix { 0u8 } else { 1 },
-            entry.legend.len(),
-            index,
-            found(entry),
-        ));
+        };
+        ranked.push((tier, entry.legend.len(), index, found(entry)));
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
     ranked.into_iter().map(|(_, _, _, hit)| hit).collect()
@@ -538,6 +548,25 @@ mod tests {
             0
         );
         assert!(list(&table, Range::Find("")).hits.is_empty());
+    }
+
+    #[test]
+    fn a_search_lists_the_key_named_so_before_qmk_names() {
+        let table = merge(&[], 0, 0, Midi::None, 4, ALL);
+        let first = |query| {
+            list(&table, Range::Find(query))
+                .hits
+                .into_iter()
+                .map(|hit| hit.token)
+                .take(2)
+                .collect::<Vec<_>>()
+        };
+        // `k` is the K key, not one of the hundreds of `KC_` names.
+        assert_eq!(first("k")[0], "KC_K");
+        assert_eq!(first("esc")[0], "KC_ESCAPE");
+        // A QMK name still finds its key, with or without `KC_`.
+        assert_eq!(first("kc_k")[0], "KC_K");
+        assert_eq!(first("kp_1")[0], "KC_KP_1");
     }
 
     #[test]
