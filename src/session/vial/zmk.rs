@@ -1035,6 +1035,10 @@ impl Zmk {
             return format!("behavior {}", binding.behavior);
         };
         let mut words = vec![behavior.name.clone()];
+        if behavior.sets.is_empty() && behavior.name.starts_with("mouse_") && binding.param1 != 0 {
+            words.push(move_text(binding.param1));
+            return words.join(" ");
+        }
         for (slot, param) in [binding.param1, binding.param2].into_iter().enumerate() {
             let described = behavior.sets.iter().flat_map(|set| &set[slot]);
             let mut word = None;
@@ -1229,6 +1233,16 @@ const BARE: &[(&str, u32)] = &[
     ("EP_ON", 1),
     ("EP_TOG", 2),
 ];
+
+/// `&mmv`/`&msc`'s parameter as a keymap writes it: `MOVE_X(-2500)`, `MOVE_Y(20)`, `MOVE(x,y)`.
+fn move_text(param: u32) -> String {
+    let (x, y) = ((param >> 16) as u16 as i16, param as u16 as i16);
+    match (x, y) {
+        (0, y) => format!("MOVE_Y({y})"),
+        (x, 0) => format!("MOVE_X({x})"),
+        (x, y) => format!("MOVE({x},{y})"),
+    }
+}
 
 /// A parameter as a keymap writes it: a number, `MOVE_X(n)`, `MOVE_Y(n)`, or a `BARE` name.
 fn bare_param(word: &str) -> Option<u32> {
@@ -2223,6 +2237,10 @@ mod tests {
         assert_eq!(bare_param("4293656576"), Some(4293656576));
         assert_eq!(bare_param("-1"), Some(u32::MAX));
         assert_eq!(bare_param("MOVE_Z(1)"), None);
+        for value in [4131127296, 2500, 65516, 1310720] {
+            assert_eq!(bare_param(&move_text(value)), Some(value));
+        }
+        assert_eq!(move_text(4131127296), "MOVE_X(-2500)");
     }
 
     #[test]
