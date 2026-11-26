@@ -828,7 +828,12 @@ const BT: &[(&str, usize)] = &[
     ("BT_CLR", 0),
     ("BT_CLR_ALL", 0),
 ];
-const OUT: &[(&str, usize)] = &[("OUT_USB", 0), ("OUT_BLE", 0), ("OUT_TOG", 0)];
+const OUT: &[(&str, usize)] = &[
+    ("OUT_USB", 0),
+    ("OUT_BLE", 0),
+    ("OUT_TOG", 0),
+    ("OUT_NONE", 0),
+];
 const EXT_POWER: &[(&str, usize)] = &[("EP_ON", 0), ("EP_OFF", 0), ("EP_TOG", 0)];
 const RGB: &[(&str, usize)] = &[
     ("RGB_TOG", 0),
@@ -852,6 +857,7 @@ const BACKLIGHT: &[(&str, usize)] = &[
     ("BL_INC", 0),
     ("BL_DEC", 0),
     ("BL_CYCLE", 0),
+    ("BL_SET", 1),
 ];
 const MOVE: &[(&str, usize)] = &[
     ("MOVE_UP", 0),

@@ -1098,13 +1098,31 @@ impl Zmk {
         else {
             return (format!("no {label} behavior"), Vec::new(), false);
         };
+        if behavior.sets.is_empty() {
+            // ZMK sends no parameter list for `&mmv`, `&msc` or `&ext_power`: take keymap text.
+            let title = format!("&{label} ({}): optional parameters", behavior.name);
+            if done.len() > 2 || done[1..].iter().any(|word| bare_param(word).is_none()) {
+                return (format!("not a {label} parameter"), Vec::new(), false);
+            }
+            if partial.is_empty() {
+                return (title, Vec::new(), true);
+            }
+            let named = BARE
+                .iter()
+                .map(|(name, _)| (name.to_string(), String::new()));
+            let mut items = rank(named.collect(), partial);
+            if bare_param(partial).is_some() && !items.iter().any(|(t, _)| t == partial) {
+                items.insert(0, (partial.to_string(), String::new()));
+            }
+            return (title, items, false);
+        }
         let mut sets: Vec<&[Vec<Param>; 2]> = behavior.sets.iter().collect();
         let mut filled = Vec::new();
         for word in &done[1..] {
             let Some(slot) = next_slot(&sets, &filled) else {
                 return (behavior.name.clone(), Vec::new(), false);
             };
-            let Some(value) = match_word(&sets, slot, word, &self.layers) else {
+            let Some(value) = match_word(&sets, label, slot, word, &self.layers) else {
                 return (format!("not a {label} parameter"), Vec::new(), false);
             };
             sets.retain(|set| accepts(&set[slot], value));
@@ -1113,7 +1131,7 @@ impl Zmk {
         let Some(slot) = next_slot(&sets, &filled) else {
             return (format!("&{label}"), Vec::new(), partial.is_empty());
         };
-        let (what, items) = slot_options(&sets, slot, &self.layers);
+        let (what, items) = slot_options(&sets, label, slot, &self.layers);
         let mut items = rank(items, partial);
         if what == "key" {
             if let Some(text) = modifier_expr(partial) {
@@ -1146,12 +1164,23 @@ impl Zmk {
             .find(|(_, token)| token == label)
             .map(|(id, _)| id)?;
         let behavior = self.behaviors.iter().find(|b| b.id == id)?;
+        if behavior.sets.is_empty() {
+            let mut chosen = [0u32; 2];
+            for (slot, word) in params.iter().enumerate() {
+                *chosen.get_mut(slot)? = bare_param(word)?;
+            }
+            return Some(Binding {
+                behavior: id,
+                param1: chosen[0],
+                param2: chosen[1],
+            });
+        }
         let mut sets: Vec<&[Vec<Param>; 2]> = behavior.sets.iter().collect();
         let mut chosen = [0u32; 2];
         let mut filled = Vec::new();
         for word in params {
             let slot = next_slot(&sets, &filled)?;
-            let value = match_word(&sets, slot, word, &self.layers)?;
+            let value = match_word(&sets, label, slot, word, &self.layers)?;
             sets.retain(|set| accepts(&set[slot], value));
             if behavior.sets.is_empty() || sets.is_empty() {
                 return None;
@@ -1185,6 +1214,45 @@ impl Zmk {
     }
 }
 
+/// ZMK's names for parameters of behaviors that send no parameter list (`pointing.h` at its
+/// default speeds, `ext_power.h`).
+const BARE: &[(&str, u32)] = &[
+    ("MOVE_UP", (-600i32 as u32) & 0xFFFF),
+    ("MOVE_DOWN", 600),
+    ("MOVE_LEFT", ((-600i32 as u32) & 0xFFFF) << 16),
+    ("MOVE_RIGHT", 600 << 16),
+    ("SCRL_UP", 10),
+    ("SCRL_DOWN", (-10i32 as u32) & 0xFFFF),
+    ("SCRL_LEFT", ((-10i32 as u32) & 0xFFFF) << 16),
+    ("SCRL_RIGHT", 10 << 16),
+    ("EP_OFF", 0),
+    ("EP_ON", 1),
+    ("EP_TOG", 2),
+];
+
+/// A parameter as a keymap writes it: a number, `MOVE_X(n)`, `MOVE_Y(n)`, or a `BARE` name.
+fn bare_param(word: &str) -> Option<u32> {
+    if let Ok(n) = word.parse::<i64>() {
+        return (i64::from(i32::MIN)..=i64::from(u32::MAX))
+            .contains(&n)
+            .then_some(n as u32);
+    }
+    let axis = |name: &str| -> Option<u32> {
+        let n = word
+            .strip_prefix(name)?
+            .strip_prefix('(')?
+            .strip_suffix(')')?;
+        Some(n.trim().parse::<i32>().ok()? as u32 & 0xFFFF)
+    };
+    if let Some(x) = axis("MOVE_X") {
+        return Some(x << 16);
+    }
+    if let Some(y) = axis("MOVE_Y") {
+        return Some(y);
+    }
+    BARE.iter().find(|(name, _)| *name == word).map(|(_, v)| *v)
+}
+
 /// Display names Studio sends, and the `&` token the key list uses. The rest are slugged.
 const LABELS: &[(&str, &str)] = &[
     ("Key Press", "kp"),
@@ -1199,19 +1267,99 @@ const LABELS: &[(&str, &str)] = &[
     ("Mouse Key Press", "mkp"),
     ("Bluetooth", "bt"),
     ("Output Selection", "out"),
-    ("RGB Underglow", "rgb_ug"),
+    ("Underglow", "rgb_ug"),
     ("External Power", "ext_power"),
     ("Backlight", "bl"),
     ("Transparent", "trans"),
     ("None", "none"),
     ("Bootloader", "bootloader"),
-    ("Reset", "reset"),
+    ("Reset", "sys_reset"),
     ("Grave/Escape", "gresc"),
     ("Caps Word", "caps_word"),
     ("Key Repeat", "key_repeat"),
     ("Studio Unlock", "studio_unlock"),
-    ("Soft Off", "soft_off"),
 ];
+
+/// The names ZMK's dt-bindings headers give a behavior's first parameter, by value
+/// (`bt.h`, `outputs.h`, `rgb.h`, `backlight.h`, `ext_power.h`, `pointing.h`), so a binding
+/// composed on a Studio board reads as it would in a keymap: `&bt BT_SEL 1`.
+const COMMANDS: &[(&str, &[(&str, u32)])] = &[
+    (
+        "bt",
+        &[
+            ("BT_CLR", 0),
+            ("BT_NXT", 1),
+            ("BT_PRV", 2),
+            ("BT_SEL", 3),
+            ("BT_CLR_ALL", 4),
+            ("BT_DISC", 5),
+        ],
+    ),
+    (
+        "out",
+        &[
+            ("OUT_TOG", 0),
+            ("OUT_USB", 1),
+            ("OUT_BLE", 2),
+            ("OUT_NONE", 3),
+        ],
+    ),
+    (
+        "rgb_ug",
+        &[
+            ("RGB_TOG", 0),
+            ("RGB_ON", 1),
+            ("RGB_OFF", 2),
+            ("RGB_HUI", 3),
+            ("RGB_HUD", 4),
+            ("RGB_SAI", 5),
+            ("RGB_SAD", 6),
+            ("RGB_BRI", 7),
+            ("RGB_BRD", 8),
+            ("RGB_SPI", 9),
+            ("RGB_SPD", 10),
+            ("RGB_EFF", 11),
+            ("RGB_EFR", 12),
+        ],
+    ),
+    (
+        "bl",
+        &[
+            ("BL_ON", 0),
+            ("BL_OFF", 1),
+            ("BL_TOG", 2),
+            ("BL_INC", 3),
+            ("BL_DEC", 4),
+            ("BL_CYCLE", 5),
+            ("BL_SET", 6),
+        ],
+    ),
+    ("ext_power", &[("EP_OFF", 0), ("EP_ON", 1), ("EP_TOG", 2)]),
+    (
+        "mkp",
+        &[
+            ("LCLK", 1),
+            ("RCLK", 2),
+            ("MCLK", 4),
+            ("MB4", 8),
+            ("MB5", 16),
+        ],
+    ),
+];
+
+/// The token a constant parameter is typed as: ZMK's name for it when the behavior's first
+/// parameter has one, else its Studio display name without spaces.
+fn constant_token(label: &str, slot: usize, value: u32, name: &str) -> String {
+    let known = (slot == 0)
+        .then(|| COMMANDS.iter().find(|(l, _)| *l == label))
+        .flatten()
+        .and_then(|(_, names)| names.iter().find(|(_, v)| *v == value));
+    match known {
+        Some((zmk, _)) => (*zmk).to_string(),
+        None if slug(name).is_empty() => value.to_string(),
+        None => slug(name),
+    }
+}
 
 fn preferred(name: &str) -> String {
     LABELS
@@ -1292,10 +1440,16 @@ fn in_range(value: u32, min: i32, max: i32) -> bool {
     value >= i64::from(min) && value <= i64::from(max)
 }
 
-fn match_word(sets: &[&[Vec<Param>; 2]], slot: usize, word: &str, layers: &[Layer]) -> Option<u32> {
-    let (what, items) = slot_options(sets, slot, layers);
+fn match_word(
+    sets: &[&[Vec<Param>; 2]],
+    label: &str,
+    slot: usize,
+    word: &str,
+    layers: &[Layer],
+) -> Option<u32> {
+    let (what, items) = slot_options(sets, label, slot, layers);
     if let Some((token, _)) = items.iter().find(|(token, _)| token == word) {
-        return option_value(sets, slot, token, layers);
+        return option_value(sets, label, slot, token, layers);
     }
     if what == "key" {
         if let Some(value) = super::zmk_keys::parse(word) {
@@ -1307,6 +1461,7 @@ fn match_word(sets: &[&[Vec<Param>; 2]], slot: usize, word: &str, layers: &[Laye
 
 fn option_value(
     sets: &[&[Vec<Param>; 2]],
+    label: &str,
     slot: usize,
     token: &str,
     layers: &[Layer],
@@ -1315,7 +1470,8 @@ fn option_value(
         for desc in &set[slot] {
             let value = match desc {
                 Param::Constant(value, name)
-                    if slug(name) == token || value.to_string() == token =>
+                    if constant_token(label, slot, *value, name) == token
+                        || value.to_string() == token =>
                 {
                     Some(*value)
                 }
@@ -1353,6 +1509,7 @@ fn range_value(sets: &[&[Vec<Param>; 2]], slot: usize, word: &str) -> Option<u32
 
 fn slot_options(
     sets: &[&[Vec<Param>; 2]],
+    label: &str,
     slot: usize,
     layers: &[Layer],
 ) -> (&'static str, Vec<(String, String)>) {
@@ -1363,12 +1520,7 @@ fn slot_options(
         for desc in &set[slot] {
             match desc {
                 Param::Constant(value, name) => {
-                    let token = slug(name);
-                    let token = if token.is_empty() {
-                        value.to_string()
-                    } else {
-                        token
-                    };
+                    let token = constant_token(label, slot, *value, name);
                     if !constants.iter().any(|(known, _)| known == &token) {
                         constants.push((token, name.clone()));
                     }
@@ -2060,6 +2212,20 @@ mod tests {
     }
 
     #[test]
+    fn behaviors_without_metadata_take_keymap_parameters() {
+        // Values read from a real Corne's `&mmv` and `&msc` keys.
+        assert_eq!(bare_param("MOVE_X(-2500)"), Some(4131127296));
+        assert_eq!(bare_param("MOVE_Y(2500)"), Some(2500));
+        assert_eq!(bare_param("MOVE_Y(-20)"), Some(65516));
+        assert_eq!(bare_param("SCRL_DOWN"), Some(0xFFF6));
+        assert_eq!(bare_param("MOVE_LEFT"), bare_param("MOVE_X(-600)"));
+        assert_eq!(bare_param("EP_TOG"), Some(2));
+        assert_eq!(bare_param("4293656576"), Some(4293656576));
+        assert_eq!(bare_param("-1"), Some(u32::MAX));
+        assert_eq!(bare_param("MOVE_Z(1)"), None);
+    }
+
+    #[test]
     fn a_binding_is_composed_from_the_behaviors_the_board_sent() {
         let fw = firmware();
         let mut board = open(&fw).unwrap();
@@ -2086,20 +2252,22 @@ mod tests {
         );
         assert!(board.intern("&kp LG(C)").is_some());
 
+        // Studio describes `&bt` by display name and value; the tokens are ZMK's own names.
         let listed = board.list(Range::Find("&bt "));
+        let tokens: Vec<&str> = listed.hits.iter().map(|hit| hit.legend.as_str()).collect();
         assert!(
-            listed.hits.iter().any(|hit| hit.legend == "SelectProfile"),
-            "{:?}",
-            listed
-                .hits
-                .iter()
-                .map(|hit| &hit.legend)
-                .collect::<Vec<_>>()
+            tokens.contains(&"BT_SEL") && tokens.contains(&"BT_NXT"),
+            "{tokens:?}"
         );
-        let listed = board.list(Range::Find("&bt SelectProfile "));
+        let listed = board.list(Range::Find("&bt BT_SEL "));
         assert!(listed.hits.iter().any(|hit| hit.legend == "1"));
-        let code = board.intern("&bt SelectProfile 1").unwrap();
+        let code = board.intern("&bt BT_SEL 1").unwrap();
         assert_eq!(board.legend(code), "Bluetooth Select Profile 1");
+        // The same binding the board already had: BT_SEL is command 3, profile 1.
+        assert_eq!(
+            board.code_at(1, Place::Matrix { row: 0, col: 1 }),
+            Some(code)
+        );
 
         // The same path the key list uses: `&`, enter, the parameter, enter, then `:w`.
         let mut model = crate::session::Model::start(crate::session::Attached {
