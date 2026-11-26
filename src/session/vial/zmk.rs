@@ -1153,12 +1153,13 @@ impl Zmk {
                 items.insert(0, (partial.to_string(), value.to_string()));
             }
         }
-        let title = format!(
-            "&{label} ({}): {what} {}/{}",
-            behavior.name,
-            filled.len() + 1,
-            param_count(behavior)
-        );
+        let count = param_count(behavior);
+        let tap = count == 2
+            && behavior
+                .sets
+                .iter()
+                .all(|set| set[1].iter().any(|p| matches!(p, Param::Usage)));
+        let title = super::file::role(what, filled.len(), count, tap);
         (title, items, false)
     }
 
@@ -1238,9 +1239,10 @@ impl Zmk {
         while let Some(slot) = next_slot(&sets, &filled) {
             let value = [binding.param1, binding.param2][slot];
             let (what, items) = slot_options(&sets, &label, slot, &self.layers);
-            // A key by its shortest ZMK name, `LGUI`; anything else by the token it is typed as.
+            // A key by the name the key list shows, `LSHIFT`; modifier functions by the
+            // shortest form; anything else by the token it is typed as.
             let key = (what == "key")
-                .then(|| super::zmk_keys::name(value))
+                .then(|| super::zmk_keys::preferred(value).or_else(|| super::zmk_keys::name(value)))
                 .flatten();
             let word = key
                 .or_else(|| {
@@ -1472,7 +1474,7 @@ fn rank(items: Vec<(String, String)>, partial: &str) -> Vec<(String, String)> {
         })
         .collect();
     hits.sort_by_key(|(rank, _)| *rank);
-    hits.into_iter().map(|(_, hit)| hit).take(300).collect()
+    hits.into_iter().map(|(_, hit)| hit).collect()
 }
 
 fn modifier_expr(partial: &str) -> Option<String> {
@@ -1619,11 +1621,7 @@ fn slot_options(
     }
     items.extend(ranges);
     if usage {
-        items.extend(
-            super::zmk_keys::KEYS
-                .iter()
-                .map(|(name, _)| ((*name).to_string(), String::new())),
-        );
+        items.extend(super::zmk_keys::listed().iter().cloned());
     }
     let what = if usage && !layer {
         "key"
@@ -2318,7 +2316,10 @@ mod tests {
         assert!(listed.hits.iter().any(|hit| hit.legend == "&trans"));
 
         let listed = board.list(Range::Find("&kp "));
-        assert!(listed.title.contains("key 1/1"), "{}", listed.title);
+        assert_eq!(listed.title, "key");
+        // A hold-tap's parameters are named by role.
+        assert_eq!(board.list(Range::Find("&mt ")).title, "hold · key");
+        assert_eq!(board.list(Range::Find("&mt LSHIFT ")).title, "tap · key");
         assert!(listed.hits.iter().any(|hit| hit.legend == "A"));
         assert_eq!(board.intern("&kp A"), Some(0x0004));
         assert_eq!(board.intern("&mt LSHIFT B"), Some(0x2205));

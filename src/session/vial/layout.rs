@@ -287,6 +287,21 @@ pub(in crate::session) enum Lower<'a> {
     },
     /// A one-line text or number field.
     Edit { title: &'a str, text: &'a str },
+    /// A ZMK binding in columns: the behavior, then each parameter. `title` is the binding.
+    Columns {
+        title: &'a str,
+        /// What is typed to narrow the active column.
+        query: &'a str,
+        columns: &'a [Column],
+        active: usize,
+    },
+}
+
+/// One part of a binding and the values it takes. `selected` is what the binding holds there.
+pub(in crate::session) struct Column {
+    pub(in crate::session) title: String,
+    pub(in crate::session) hits: Vec<Found>,
+    pub(in crate::session) selected: Option<usize>,
 }
 
 /// A box drawn over the screen, which dims behind it.
@@ -972,7 +987,9 @@ fn window_start(len: usize, cursor: usize, room: usize) -> usize {
 
 fn lower_title<'a>(lower: &Lower<'a>) -> &'a str {
     match lower {
-        Lower::Search { title, .. } | Lower::Edit { title, .. } => title,
+        Lower::Search { title, .. } | Lower::Edit { title, .. } | Lower::Columns { title, .. } => {
+            title
+        }
     }
 }
 
@@ -1005,7 +1022,74 @@ fn lower_body(lower: &Lower<'_>, room: usize, width: u16) -> Vec<String> {
                 dye_bg(" ", SELECTED_FG, SELECTED_BG)
             )]
         }
+        Lower::Columns {
+            query,
+            columns,
+            active,
+            ..
+        } => columns_body(columns, *active, query, room, width),
     }
+}
+
+/// The query line, a header per column, then each column's values side by side, every
+/// column scrolled to keep its chosen value in view. The active column's choice is filled.
+fn columns_body(
+    columns: &[Column],
+    active: usize,
+    query: &str,
+    room: usize,
+    width: usize,
+) -> Vec<String> {
+    let block = dye_bg(" ", SELECTED_FG, SELECTED_BG);
+    let hint = dye(
+        "←→ part   ↑↓ choose   type to narrow   enter stage",
+        DIM,
+        false,
+    );
+    let mut out = vec![format!(" › {query}{block}   {hint}")];
+    if columns.is_empty() || room < 3 {
+        return out;
+    }
+    let cw = (width.saturating_sub(1) / columns.len()).max(8);
+    let mut header = String::from(" ");
+    for (index, column) in columns.iter().enumerate() {
+        let title: String = column.title.chars().take(cw - 1).collect();
+        let tone = if index == active { SELECTED_BG } else { DIM };
+        header.push_str(&dye(&pad_visible(&title, cw), tone, true));
+    }
+    out.push(header);
+    let rows = room - 2;
+    let starts: Vec<usize> = columns
+        .iter()
+        .map(|column| window_start(column.hits.len(), column.selected.unwrap_or(0), rows))
+        .collect();
+    for row in 0..rows {
+        let mut line = String::from(" ");
+        for (index, column) in columns.iter().enumerate() {
+            let at = starts[index] + row;
+            let Some(hit) = column.hits.get(at) else {
+                line.push_str(&" ".repeat(cw));
+                continue;
+            };
+            let on = column.selected == Some(at);
+            let mark = if on { "› " } else { "  " };
+            let name: String = format!("{mark}{}", hit.legend)
+                .chars()
+                .take(cw - 1)
+                .collect();
+            let left = cw - 1 - name.chars().count();
+            let about: String = format!("  {}", hit.token).chars().take(left).collect();
+            let about = pad_visible(&about, left);
+            line.push_str(&if on && index == active {
+                dye_bg(&format!("{name}{about}"), SELECTED_FG, SELECTED_BG)
+            } else {
+                format!("{}{}", dye(&name, TEXT, on), dye(&about, DIM, false))
+            });
+            line.push(' ');
+        }
+        out.push(line);
+    }
+    out
 }
 
 /// Two lines per board, a blank line between: name and maker, then USB id and serial.

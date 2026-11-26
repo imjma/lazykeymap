@@ -706,6 +706,50 @@ fn shortest(value: u32) -> Option<&'static str> {
         .min_by_key(|n| n.len())
 }
 
+/// The name a key is listed and written by: keys.h's first name, or its first alias when that
+/// is long (`N1`, not `NUMBER_1`; `LSHIFT`, not `LEFT_SHIFT`), as keymaps usually write them.
+fn preferred_of(names: &[&'static str]) -> &'static str {
+    match names {
+        [first, alias, ..] if first.len() > 6 => alias,
+        [first, ..] => first,
+        [] => "",
+    }
+}
+
+/// One row per key, in header order: the name it is listed by, then its other names, which
+/// the key list matches too.
+pub(super) fn listed() -> &'static [(String, String)] {
+    static LISTED: std::sync::LazyLock<Vec<(String, String)>> = std::sync::LazyLock::new(|| {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &(_, value) in KEYS {
+            if !seen.insert(value) {
+                continue;
+            }
+            let names: Vec<&str> = KEYS
+                .iter()
+                .filter(|(_, v)| *v == value)
+                .map(|(n, _)| *n)
+                .collect();
+            let shown = preferred_of(&names);
+            let others: Vec<&str> = names.into_iter().filter(|n| *n != shown).collect();
+            out.push((shown.to_string(), others.join(" ")));
+        }
+        out
+    });
+    &LISTED
+}
+
+/// The listed name of a key value with no modifiers wrapped around it.
+pub(super) fn preferred(value: u32) -> Option<String> {
+    let names: Vec<&'static str> = KEYS
+        .iter()
+        .filter(|(_, v)| *v == value)
+        .map(|(n, _)| *n)
+        .collect();
+    (!names.is_empty()).then(|| preferred_of(&names).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +776,24 @@ mod tests {
         assert_eq!(name(0x0207_001E).as_deref(), Some("EXCL"));
         assert_eq!(name(0x0307_002B).as_deref(), Some("LC(LS(TAB))"));
         assert_eq!(name(0x07_FFFF), None);
+    }
+
+    #[test]
+    fn each_key_is_listed_once_by_the_name_keymaps_use() {
+        let listed = listed();
+        let row = |name: &str| {
+            listed
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, a)| a.as_str())
+        };
+        assert_eq!(row("N1"), Some("NUMBER_1 NUM_1"));
+        assert_eq!(row("LSHIFT"), Some("LEFT_SHIFT LSHFT LSFT"));
+        assert_eq!(row("COMMA").is_some() && row("BSPC").is_some(), true);
+        assert!(row("NUMBER_1").is_none() && row("LSFT").is_none());
+        let values: std::collections::HashSet<u32> = KEYS.iter().map(|(_, v)| *v).collect();
+        assert_eq!(listed.len(), values.len());
+        assert_eq!(preferred(0x07_00E1).as_deref(), Some("LSHIFT"));
     }
 
     #[test]

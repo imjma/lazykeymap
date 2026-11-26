@@ -53,8 +53,8 @@ fn a_keymap_file_is_edited_in_place() {
     for step in ["&thm", "LSH", "B"] {
         typed(&mut app, step);
         let text = plain(app.screen().text());
-        // After the behavior, the list asks for its first parameter: a key, as `&thm` holds `&kp`.
-        assert!(step != "LSH" || text.contains("key 1/2"), "{text}");
+        // After the behavior, its columns follow: a hold key then a tap key, as `&thm` holds `&kp`.
+        assert!(step != "LSH" || text.contains("hold · key"), "{text}");
         app.handle(Event::Confirm).unwrap();
     }
 
@@ -89,14 +89,16 @@ fn one_part_of_a_binding_is_changed_and_the_rest_kept() {
         lazykeymap::attach_file(&dir).unwrap(),
         TestScreen::new(130, 34),
     );
-    // `&thm LSHIFT A`: the list opens on its tap key, as Keymap Editor's parameter chip.
+    // `&thm LSHIFT A` opens in columns, on its tap key, as Keymap Editor's parameter chip.
     typed(&mut app, "jl");
     app.handle(Event::Confirm).unwrap();
     let text = plain(app.screen().text());
-    assert!(text.contains("&thm  LSHIFT  [A]"), "{text}");
-    // Back to the hold modifier; LCTRL replaces it and the tap key stays.
+    assert!(
+        text.contains("&thm LSHIFT A") && text.contains("tap · key") && text.contains("› A"),
+        "{text}"
+    );
+    // Back to the hold key; LCTRL replaces it and the tap key stays.
     app.handle(Event::BackTab).unwrap();
-    assert!(plain(app.screen().text()).contains("&thm  [LSHIFT]  A"));
     typed(&mut app, "LCTRL");
     app.handle(Event::Confirm).unwrap();
     typed(&mut app, ":w");

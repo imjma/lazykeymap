@@ -338,14 +338,11 @@ struct Wrap {
     legend: String,
 }
 
-/// The search list, titled with the pending `(kc)` code, or a ZMK binding's parts.
+/// The search list, titled with the pending `(kc)` code when there is one.
 fn search_list(session: &Session<Mapping>, browse: &Browse, wrap: &Option<Wrap>) -> vial::Listed {
     let mut listed = session.list(browse);
     if let Some(wrap) = wrap {
         listed.title = format!("{} > {}", wrap.legend, listed.title);
-    }
-    if let Browse::Part { parts, .. } = browse {
-        listed.title = format!("{}  ·  {}", parts.row(), listed.title);
     }
     listed
 }
@@ -367,44 +364,90 @@ enum Browse {
         query: Query,
         back: ShelfIndex,
     },
-    /// A ZMK binding edited a part at a time, as Keymap Editor's chips: `query` is the parts
-    /// before the active one, then what is typed for it.
+    /// A ZMK binding in columns, one per part, as Keymap Editor's chips: `query` is the parts
+    /// left of the active column, then what is typed to narrow it.
     Part {
         parts: Parts,
         query: String,
     },
 }
 
-/// A binding's words, `&mt LSHIFT A`, and which one the list is choosing. `at` may be one past
-/// the end, for a parameter the binding does not have yet.
+/// A binding's words, `&mt LSHIFT A`, one per column, and the active column. The active word
+/// follows the highlight; words right of it are kept while they still fit. `at` is at most
+/// `words.len()`, a column with nothing chosen yet.
 struct Parts {
     words: Vec<String>,
     at: usize,
+    /// The binding the list opened on. Its words stay valid where the lists do not hold them,
+    /// as a `#define`d layer name.
+    original: Vec<String>,
 }
 
 impl Parts {
-    /// What the composer is given for the active part: the behavior list, or the parts before.
-    fn prefix(&self) -> String {
-        match self.at {
+    /// What the composer is given for column `i`: the behavior list, or the words left of it.
+    fn prefix_of(&self, i: usize) -> String {
+        match i {
             0 => "&".to_string(),
-            at => format!("{} ", self.words[..at].join(" ")),
+            _ => format!("{} ", self.words[..i].join(" ")),
         }
     }
 
-    /// `&mt  [LSHIFT]  A`, the list's title.
-    fn row(&self) -> String {
-        let mut shown: Vec<String> = self.words.clone();
-        if self.at == shown.len() {
-            shown.push(String::new());
-        }
-        shown[self.at] = format!("[{}]", shown[self.at]);
-        shown.join("  ")
+    fn prefix(&self) -> String {
+        self.prefix_of(self.at)
     }
 
-    /// The parts after the active one, kept when a pick leaves them fitting.
-    fn tail(&self) -> &[String] {
-        self.words.get(self.at + 1..).unwrap_or_default()
+    /// Sets the active column's word, as the highlight moves.
+    fn choose(&mut self, word: &str) {
+        match self.words.get_mut(self.at) {
+            Some(slot) => *slot = word.to_string(),
+            None => self.words.push(word.to_string()),
+        }
     }
+}
+
+/// Column `i`'s values, narrowed by `filter`.
+fn column_hits(session: &Session<Mapping>, parts: &Parts, i: usize, filter: &str) -> vial::Listed {
+    let filter = if i == 0 {
+        filter.trim_start_matches('&')
+    } else {
+        filter
+    };
+    session.board.list(vial::Range::Find(&format!(
+        "{}{filter}",
+        parts.prefix_of(i)
+    )))
+}
+
+/// Where `word` is among `hits`: by its name, or by an alias the hit lists (`LSHFT` is the
+/// `LSHIFT` row).
+fn hit_of(hits: &[vial::Found], word: &str) -> Option<usize> {
+    hits.iter()
+        .position(|hit| hit.legend == word || hit.token.split(' ').any(|alias| alias == word))
+}
+
+/// Whether column `i` holds a value its behavior takes there.
+fn word_valid(session: &Session<Mapping>, parts: &Parts, i: usize) -> bool {
+    let Some(word) = parts.words.get(i) else {
+        return false;
+    };
+    let unchanged =
+        parts.words.get(..i) == parts.original.get(..i) && parts.original.get(i) == Some(word);
+    unchanged || hit_of(&column_hits(session, parts, i, word).hits, word).is_some()
+}
+
+/// How many columns the binding has: the behavior, then each parameter it takes so far. A
+/// parameter's own list can depend on the one before (`&bt BT_SEL` then a profile), so the
+/// count stops one past the first column without a valid value.
+fn column_count(session: &Session<Mapping>, parts: &Parts) -> usize {
+    let mut count = 1;
+    while count < 8 && word_valid(session, parts, count - 1) {
+        let done = parts.words[..count].join(" ");
+        if session.board.typed_complete(&format!("{done} ")) != Some(false) {
+            return count;
+        }
+        count += 1;
+    }
+    count
 }
 
 impl Browse {
@@ -413,10 +456,11 @@ impl Browse {
             Browse::Shelf(index) => (String::new(), index),
             Browse::Find { query, back } => (query.0, back),
             // `&` starts the binding over, from its behavior and with no parts kept.
-            Browse::Part { .. } if ch == '&' => {
+            Browse::Part { parts, .. } if ch == '&' => {
                 let parts = Parts {
                     words: Vec::new(),
                     at: 0,
+                    original: parts.original,
                 };
                 let query = parts.prefix();
                 return Browse::Part { parts, query };
@@ -453,11 +497,12 @@ impl Browse {
         }
     }
 
+    /// The next group, or for a binding in columns the next of its `len` columns.
     fn shift_shelf(self, delta: i8, len: usize) -> Self {
         let ShelfIndex(index) = match self {
             Browse::Shelf(index) | Browse::Find { back: index, .. } => index,
             Browse::Part { mut parts, .. } => {
-                let len = parts.words.len().max(1) as isize;
+                let len = len.max(1) as isize;
                 parts.at = (parts.at as isize + isize::from(delta)).rem_euclid(len) as usize;
                 let query = parts.prefix();
                 return Browse::Part { parts, query };
@@ -998,8 +1043,21 @@ impl Model {
                 cursor,
                 ..
             } => {
-                let hits = session.list(browse).hits;
-                grid_step(cursor, hits.len(), vial::search_across(&hits, cols), dir);
+                if matches!(browse, Browse::Part { .. }) {
+                    // A binding in columns: up and down choose, left and right change column.
+                    match dir {
+                        vial::Dir::Up | vial::Dir::Down => {
+                            let len = session.list(browse).hits.len();
+                            move_cursor(cursor, len, dir);
+                            follow(session, browse, *cursor);
+                        }
+                        vial::Dir::Left => shift_column(session, browse, cursor, -1),
+                        vial::Dir::Right => shift_column(session, browse, cursor, 1),
+                    }
+                } else {
+                    let hits = session.list(browse).hits;
+                    grid_step(cursor, hits.len(), vial::search_across(&hits, cols), dir);
+                }
             }
             ModelKind::Palette {
                 session,
@@ -1102,10 +1160,16 @@ impl Model {
             return self.answer(session, back, question, ch);
         }
         match &mut self.kind {
-            ModelKind::Search { browse, cursor, .. } => {
+            ModelKind::Search {
+                session,
+                browse,
+                cursor,
+                ..
+            } => {
                 let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
                 *browse = old.type_char(ch);
                 *cursor = 0;
+                follow(session, browse, 0);
             }
             ModelKind::Edit { field, text, .. } => {
                 if field.accepts(text, ch) {
@@ -1135,15 +1199,19 @@ impl Model {
                 cursor,
                 ..
             } => {
-                // Four rows of the grid at a time.
+                // Four rows of the grid at a time; ten values of a column.
                 let hits = session.list(browse).hits;
-                let step = vial::search_across(&hits, cols) * 4;
+                let step = match browse {
+                    Browse::Part { .. } => 10,
+                    _ => vial::search_across(&hits, cols) * 4,
+                };
                 let last = hits.len().saturating_sub(1);
                 *cursor = if delta < 0 {
                     cursor.saturating_sub(step)
                 } else {
                     (*cursor + step).min(last)
                 };
+                follow(session, browse, *cursor);
             }
             ModelKind::Sheet { session, spot, .. } => {
                 shift(&mut spot.row, sheet_rows(&session.board, spot.tab), delta);
@@ -1177,7 +1245,10 @@ impl Model {
                 browse,
                 cursor,
                 ..
-            } => *cursor = pick(session.list(browse).hits.len()),
+            } => {
+                *cursor = pick(session.list(browse).hits.len());
+                follow(session, browse, *cursor);
+            }
             ModelKind::Sheet { session, spot, .. } => {
                 spot.row = pick(sheet_rows(&session.board, spot.tab));
                 clamp_col(&session.board, spot);
@@ -1240,10 +1311,16 @@ impl Model {
                 browse: Browse::Part { parts, query },
                 ..
             } if *query == parts.prefix() => return self.cancel(),
-            ModelKind::Search { browse, cursor, .. } => {
+            ModelKind::Search {
+                session,
+                browse,
+                cursor,
+                ..
+            } => {
                 let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
                 *browse = old.backspace();
                 *cursor = 0;
+                follow(session, browse, 0);
             }
             ModelKind::Edit { text, .. } => {
                 text.pop();
@@ -1269,12 +1346,16 @@ impl Model {
             ..
         } = &mut self.kind
         {
-            let count = session.board.shelf_count();
-            if count > 0 || matches!(browse, Browse::Part { .. }) {
-                let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
-                *browse = old.shift_shelf(delta, count);
+            if matches!(browse, Browse::Part { .. }) {
+                shift_column(session, browse, cursor, delta);
+            } else {
+                let count = session.board.shelf_count();
+                if count > 0 {
+                    let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
+                    *browse = old.shift_shelf(delta, count);
+                }
+                *cursor = 0;
             }
-            *cursor = current_hit(session, browse);
         }
         Ok(Step::Continue)
     }
@@ -1972,8 +2053,8 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
 /// The key list for a key or cell. On a ZMK board or keymap file it opens on the binding's
 /// last part, as Keymap Editor's parameter chip; on Vial, on the first group.
 fn searching(session: Session<Mapping>, target: Target) -> ModelKind {
-    let browse = binding_parts(&session, &target).unwrap_or(Browse::Shelf(ShelfIndex(0)));
-    let cursor = current_hit(&session, &browse);
+    let mut browse = binding_parts(&session, &target).unwrap_or(Browse::Shelf(ShelfIndex(0)));
+    let cursor = land_on(&session, &mut browse);
     ModelKind::Search {
         session,
         browse,
@@ -2018,30 +2099,69 @@ fn binding_parts(session: &Session<Mapping>, target: &Target) -> Option<Browse> 
     } else {
         Vec::new()
     };
-    let parts = Parts {
-        at: words.len().saturating_sub(1),
+    let mut parts = Parts {
+        at: 0,
+        original: words.clone(),
         words,
     };
+    parts.at = column_count(session, &parts) - 1;
     Some(Browse::Part {
         query: parts.prefix(),
         parts,
     })
 }
 
-/// The hit for the active part's current value, so the list opens on what the key has.
+/// The hit for the active column's word, so a column opens on what the binding has.
 fn current_hit(session: &Session<Mapping>, browse: &Browse) -> usize {
     let Browse::Part { parts, .. } = browse else {
         return 0;
     };
-    let Some(word) = parts.words.get(parts.at) else {
-        return 0;
-    };
-    session
+    parts
+        .words
+        .get(parts.at)
+        .and_then(|word| hit_of(&session.list(browse).hits, word))
+        .unwrap_or(0)
+}
+
+/// The highlight chooses: the active column's word becomes the hit at `cursor`.
+fn follow(session: &Session<Mapping>, browse: &mut Browse, cursor: usize) {
+    if !matches!(browse, Browse::Part { .. }) {
+        return;
+    }
+    let Some(word) = session
         .list(browse)
         .hits
-        .iter()
-        .position(|hit| hit.legend == *word)
-        .unwrap_or(0)
+        .get(cursor)
+        .map(|hit| hit.legend.clone())
+    else {
+        return;
+    };
+    if let Browse::Part { parts, .. } = browse {
+        parts.choose(&word);
+    }
+}
+
+/// Moves to the next or previous column, wrapping, and highlights what it holds.
+fn shift_column(session: &Session<Mapping>, browse: &mut Browse, cursor: &mut usize, delta: i8) {
+    let Browse::Part { parts, .. } = browse else {
+        return;
+    };
+    let count = column_count(session, parts);
+    let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
+    *browse = old.shift_shelf(delta, count);
+    *cursor = land_on(session, browse);
+}
+
+/// The highlight for the active column: what it holds, or, when it holds nothing the column
+/// takes, its first value, chosen, so Enter always moves the binding on.
+fn land_on(session: &Session<Mapping>, browse: &mut Browse) -> usize {
+    let Browse::Part { parts, .. } = browse else {
+        return 0;
+    };
+    if !word_valid(session, parts, parts.at) {
+        follow(session, browse, 0);
+    }
+    current_hit(session, browse)
 }
 
 fn back_to(session: Session<Mapping>, spot: Option<vial::Spot>) -> ModelKind {
@@ -2145,100 +2265,37 @@ impl Model {
         target: Target,
     ) {
         let mut session = session;
-        // A query that starts with `&` is a binding being typed, as `&kp A`. On a keymap
-        // file or a Studio board, Enter takes the highlighted behavior or value; once the
-        // behavior has every parameter it takes, the binding is staged.
-        let typed = match &browse {
-            Browse::Find { query, .. } if query.as_str().starts_with('&') => {
-                Some(query.as_str().to_string())
+        // A ZMK binding in columns: Enter stages it once every column holds a value its
+        // behavior takes, and otherwise moves to the first column still to choose.
+        let columns = match &browse {
+            Browse::Part { parts, .. } => {
+                let count = column_count(&session, parts);
+                let missing = (0..count).find(|&i| !word_valid(&session, parts, i));
+                let text = parts.words[..count.min(parts.words.len())].join(" ");
+                Some((count, missing, text))
             }
-            Browse::Part { query, .. } => Some(query.clone()),
             _ => None,
         };
-        if let Some(typed) = typed {
-            let hits = session.list(&browse).hits;
-            let mut words: Vec<String> = typed.split_whitespace().map(str::to_string).collect();
-            if let Some(hit) = hits.get(cursor) {
-                if !typed.ends_with(' ') {
-                    words.pop();
-                }
-                words.push(hit.legend.clone());
-            }
-            let mut next = words.join(" ");
-            // A part picked keeps the parts after it when the binding still takes them:
-            // `&mt LSHIFT A` with LCTRL picked is `&mt LCTRL A`.
-            if let Browse::Part { parts, .. } = &browse {
-                let whole = format!("{next} {}", parts.tail().join(" "));
-                if !parts.tail().is_empty()
-                    && session.board.typed_complete(&format!("{whole} ")) == Some(true)
-                {
-                    next = whole;
-                }
-            }
-            match session.board.typed_complete(&format!("{next} ")) {
-                None => {
-                    self.notice =
-                        Some("typed bindings work on a ZMK keyboard or a keymap file".to_string());
-                }
-                Some(false) => {
-                    let query = format!("{next} ");
-                    let browse = match browse {
-                        Browse::Find { back, .. } => Browse::Find {
-                            query: Query(query),
-                            back,
-                        },
-                        _ => {
-                            let words: Vec<String> =
-                                next.split_whitespace().map(str::to_string).collect();
-                            Browse::Part {
-                                parts: Parts {
-                                    at: words.len(),
-                                    words,
-                                },
-                                query,
-                            }
-                        }
-                    };
-                    self.kind = ModelKind::Search {
-                        session,
-                        browse,
-                        cursor: 0,
-                        wrap,
-                        target,
-                    };
-                    return;
-                }
-                Some(true) => {
-                    let code = session.board.intern(&next);
-                    match (&target, code, session.selection) {
-                        (Target::Key, Some(code), Some(place)) => {
-                            let layer = session.layer;
-                            self.land(session, vial::Write::Key { layer, place, code }, None);
-                            return;
-                        }
-                        (
-                            Target::Cell {
-                                spot:
-                                    spot @ vial::Spot {
-                                        tab: vial::Tab::Section(kind),
-                                        ..
-                                    },
-                                insert,
-                            },
-                            ..,
-                        ) => {
-                            let (write, after) =
-                                section_text(&session.board, *kind, *spot, insert.is_some(), next);
-                            self.land(session, write, Some(after));
-                            return;
-                        }
-                        _ => {
-                            self.notice =
-                                Some("a typed binding goes on a key or a file's tab".to_string());
-                        }
+        if let Some((count, missing, text)) = columns {
+            let done = missing.is_none()
+                && session.board.typed_complete(&format!("{text} ")) == Some(true);
+            let mut browse = match browse {
+                Browse::Part { mut parts, .. } if !done => {
+                    parts.at = missing.unwrap_or(count - 1);
+                    Browse::Part {
+                        query: parts.prefix(),
+                        parts,
                     }
                 }
-            }
+                browse => {
+                    match self.stage_binding(session, &target, text) {
+                        Ok(()) => return,
+                        Err(back) => session = back,
+                    }
+                    browse
+                }
+            };
+            let cursor = land_on(&session, &mut browse);
             self.kind = ModelKind::Search {
                 session,
                 browse,
@@ -2300,6 +2357,44 @@ impl Model {
             }
         };
         self.land(session, write, after);
+    }
+
+    /// Stages a typed binding on the key or section cell the list was opened for. The session
+    /// comes back when it has nowhere to go.
+    fn stage_binding(
+        &mut self,
+        mut session: Session<Mapping>,
+        target: &Target,
+        text: String,
+    ) -> std::result::Result<(), Session<Mapping>> {
+        let code = session.board.intern(&text);
+        match (target, code, session.selection) {
+            (Target::Key, Some(code), Some(place)) => {
+                let layer = session.layer;
+                self.land(session, vial::Write::Key { layer, place, code }, None);
+                Ok(())
+            }
+            (
+                Target::Cell {
+                    spot:
+                        spot @ vial::Spot {
+                            tab: vial::Tab::Section(kind),
+                            ..
+                        },
+                    insert,
+                },
+                ..,
+            ) => {
+                let (write, after) =
+                    section_text(&session.board, *kind, *spot, insert.is_some(), text);
+                self.land(session, write, Some(after));
+                Ok(())
+            }
+            _ => {
+                self.notice = Some("a typed binding goes on a key or a file's tab".to_string());
+                Err(session)
+            }
+        }
     }
 }
 
@@ -2976,6 +3071,38 @@ fn render(
             wrap,
             target,
         } => {
+            if let Browse::Part { parts, query } = browse {
+                let count = column_count(session, parts);
+                let filter = query.get(parts.prefix().len()..).unwrap_or_default();
+                let columns: Vec<vial::Column> = (0..count)
+                    .map(|i| {
+                        let active = i == parts.at;
+                        let listed =
+                            column_hits(session, parts, i, if active { filter } else { "" });
+                        let selected = if active {
+                            Some(*cursor)
+                        } else {
+                            parts
+                                .words
+                                .get(i)
+                                .and_then(|word| hit_of(&listed.hits, word))
+                        };
+                        vial::Column {
+                            title: listed.title,
+                            hits: listed.hits,
+                            selected,
+                        }
+                    })
+                    .collect();
+                let text = parts.words[..count.min(parts.words.len())].join(" ");
+                let lower = vial::Lower::Columns {
+                    title: &text,
+                    query: filter,
+                    columns: &columns,
+                    active: parts.at,
+                };
+                return session.paint(target.spot(), None, Some(lower), &chrome);
+            }
             let listed = search_list(session, browse, wrap);
             let query = match browse {
                 Browse::Find { query, .. } => query.as_str(),

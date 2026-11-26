@@ -982,10 +982,7 @@ fn complete(doc: &Doc, typed: &str) -> Completion {
             })
             .collect();
         hits.sort_by_key(|(rank, _)| *rank);
-        hits.into_iter()
-            .map(|(_, hit)| hit)
-            .take(300)
-            .collect::<Vec<_>>()
+        hits.into_iter().map(|(_, hit)| hit).collect::<Vec<_>>()
     };
     let Some(head) = done.first() else {
         let items = known
@@ -997,7 +994,7 @@ fn complete(doc: &Doc, typed: &str) -> Completion {
         return ("behavior".to_string(), items, false);
     };
     let label = head.trim_start_matches('&');
-    let Some((_, about, params)) = known.iter().find(|(known, ..)| known == label) else {
+    let Some((_, _, params)) = known.iter().find(|(known, ..)| known == label) else {
         return (format!("{label}: type its parameters"), Vec::new(), true);
     };
     // A command that takes a number adds that parameter.
@@ -1021,10 +1018,7 @@ fn complete(doc: &Doc, typed: &str) -> Completion {
     };
     let (what, items): (&str, Vec<(String, String)>) = match param {
         Param::Key | Param::Any => {
-            let mut items: Vec<(String, String)> = zmk_keys::KEYS
-                .iter()
-                .map(|(name, _)| (name.to_string(), String::new()))
-                .collect();
+            let mut items: Vec<(String, String)> = zmk_keys::listed().to_vec();
             // `LG(C)` is not a table name. If it parses, it is the hit, so Enter does not take another key.
             let typed = partial.trim();
             if typed.contains('(') && zmk_keys::parse(typed).is_some() {
@@ -1062,8 +1056,20 @@ fn complete(doc: &Doc, typed: &str) -> Completion {
         Param::Profile => ("profile", names(&["0", "1", "2", "3", "4"])),
         Param::Button => ("button", names(&["LCLK", "RCLK", "MCLK", "MB4", "MB5"])),
     };
-    let title = format!("&{label} ({about}): {what} {}/{}", at + 1, params.len());
+    let tap = params.len() == 2 && matches!(params[1], Param::Key);
+    let title = role(what, at, params.len(), tap);
     (title, rank(items, partial), false)
+}
+
+/// A parameter column's title: a hold-tap's two parameters are `hold · modifier` and `tap ·
+/// key`; anything else says what it takes, numbered when there are more.
+pub(super) fn role(what: &str, at: usize, count: usize, tap: bool) -> String {
+    match (tap, at) {
+        (true, 0) => format!("hold · {what}"),
+        (true, _) => format!("tap · {what}"),
+        _ if count > 1 => format!("{what} {}/{count}", at + 1),
+        _ => what.to_string(),
+    }
 }
 
 /// The key-list name of a custom binding: its text without the `&`.
