@@ -10,7 +10,8 @@ mod keycodes;
 pub(super) use catalog::{Found, Listed, Range};
 pub(super) use entries::{Action, Combo, Spot, Tab, TapDance, MAX_DELAY};
 pub(super) use layout::{
-    basic_step, search_across, Column, Lower, Mode, ModeTone, Popup, PopupLine,
+    basic_step, hits_at, search_across, zones, Column, Hit, Lower, Mode, ModeTone, Popup,
+    PopupLine, Zone,
 };
 mod dts;
 mod file;
@@ -3370,17 +3371,18 @@ mod tests {
                 land: 0,
             },
             notice: None,
+            zones: Vec::new(),
         };
-        let text = plain(&model.text(60, 12));
+        let text = plain(&model.frame(60, 12));
         assert!(text.contains("opening…"), "{text}");
         assert!(text.contains('▰') && text.contains("layout"), "{text}");
         model.handle(crate::Event::Cancel, 60).unwrap();
-        let text = plain(&model.text(60, 12));
+        let text = plain(&model.frame(60, 12));
         assert!(text.contains("stopped opening"), "{text}");
         assert!(text.contains("▌ slow"), "{text}");
         // The same board opens from the start again.
         model.handle(crate::Event::Confirm, 60).unwrap();
-        assert!(model.text(60, 12).contains("layer 0/"));
+        assert!(model.frame(60, 12).contains("layer 0/"));
     }
 
     #[test]
@@ -3391,7 +3393,7 @@ mod tests {
         .unwrap()
         .named("only");
         let attached = super::super::list_first(vec![board.candidate()]).unwrap();
-        let text = plain(&super::super::Model::start(attached).text(40, 8));
+        let text = plain(&super::super::Model::start(attached).frame(40, 8));
         assert!(text.contains("choose"), "{text}");
         assert!(text.contains("▌ only"), "{text}");
         assert!(!text.contains("layer "), "{text}");

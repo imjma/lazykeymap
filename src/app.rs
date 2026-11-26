@@ -81,7 +81,7 @@ impl<S: Screen> App<S> {
     }
 
     fn paint(&mut self) {
-        let text = self.model.text(self.screen.cols(), self.screen.rows());
+        let text = self.model.frame(self.screen.cols(), self.screen.rows());
         if text == self.shown {
             return;
         }

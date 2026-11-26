@@ -24,6 +24,183 @@ impl std::fmt::Display for Place {
     }
 }
 
+/// What a mouse click lands on. The drawing wraps each one around its text with `mark`, and
+/// `zones` finds where it ended up once the frame is clipped, boxed, and covered.
+#[derive(Clone, PartialEq, Eq)]
+pub(in crate::session) enum Hit {
+    /// A header tab: the layers, then the editors.
+    Tab(usize),
+    Key(Place),
+    /// A layer chip under the selected key.
+    Layer(u8),
+    /// A key-list hit, by index.
+    Pick(usize),
+    /// A key-list group named in the panel title.
+    Shelf(usize),
+    /// A value in a binding column: `(column, hit)`.
+    Part(usize, usize),
+    /// A sheet cell: `(row, column)`.
+    Cell(usize, usize),
+    /// A board on the choose screen.
+    Card(usize),
+    /// The nth pick-one line of a popup, counted over its whole body.
+    Choice(usize),
+    /// A popup's answer chip, by its key name.
+    Chip(String),
+    /// An options-bar hint, by index.
+    Hint(usize),
+    Help,
+    /// The lower panel, borders and all: the wheel scrolls it.
+    Lower,
+}
+
+impl Hit {
+    /// Digits and `;` only, so a mark reads as one escape sequence ending at `m`.
+    fn code(&self) -> String {
+        let n = |v: usize| v as u32;
+        let numbers: Vec<u32> = match self {
+            Hit::Tab(i) => vec![0, n(*i)],
+            Hit::Key(Place::Matrix { row, col }) => vec![1, (*row).into(), (*col).into()],
+            Hit::Key(Place::Encoder { index, direction }) => {
+                vec![2, (*index).into(), (*direction).into()]
+            }
+            Hit::Layer(layer) => vec![3, (*layer).into()],
+            Hit::Pick(i) => vec![4, n(*i)],
+            Hit::Shelf(i) => vec![5, n(*i)],
+            Hit::Part(column, i) => vec![6, n(*column), n(*i)],
+            Hit::Cell(row, col) => vec![7, n(*row), n(*col)],
+            Hit::Card(i) => vec![8, n(*i)],
+            Hit::Choice(i) => vec![9, n(*i)],
+            Hit::Chip(key) => std::iter::once(10)
+                .chain(key.chars().map(u32::from))
+                .collect(),
+            Hit::Hint(i) => vec![11, n(*i)],
+            Hit::Help => vec![12],
+            Hit::Lower => vec![13],
+        };
+        numbers
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    fn parse(code: &str) -> Option<Hit> {
+        let n: Vec<u32> = code
+            .split(';')
+            .map(|part| part.parse().ok())
+            .collect::<Option<_>>()?;
+        let at = |i: usize| n.get(i).map(|&v| v as usize);
+        let byte = |i: usize| n.get(i).and_then(|&v| u8::try_from(v).ok());
+        Some(match n.first()? {
+            0 => Hit::Tab(at(1)?),
+            1 => Hit::Key(Place::Matrix {
+                row: byte(1)?,
+                col: byte(2)?,
+            }),
+            2 => Hit::Key(Place::Encoder {
+                index: byte(1)?,
+                direction: byte(2)?,
+            }),
+            3 => Hit::Layer(byte(1)?),
+            4 => Hit::Pick(at(1)?),
+            5 => Hit::Shelf(at(1)?),
+            6 => Hit::Part(at(1)?, at(2)?),
+            7 => Hit::Cell(at(1)?, at(2)?),
+            8 => Hit::Card(at(1)?),
+            9 => Hit::Choice(at(1)?),
+            10 => Hit::Chip(n[1..].iter().filter_map(|&c| char::from_u32(c)).collect()),
+            11 => Hit::Hint(at(1)?),
+            12 => Hit::Help,
+            13 => Hit::Lower,
+            _ => return None,
+        })
+    }
+}
+
+const MARK_END: &str = "\u{1b}[<m";
+
+/// `text` tagged as `hit`. The tags are zero-width escapes: every width helper here skips them,
+/// and `zones` takes them out before the terminal sees the frame.
+pub(super) fn mark(hit: &Hit, text: &str) -> String {
+    format!("\u{1b}[>{}m{text}{MARK_END}", hit.code())
+}
+
+fn is_mark(seq: &str) -> bool {
+    seq.starts_with("\u{1b}[>") || seq.starts_with("\u{1b}[<")
+}
+
+/// Where a hit landed on screen: columns `start..end` of `row`.
+pub(in crate::session) struct Zone {
+    pub(in crate::session) row: u16,
+    pub(in crate::session) start: u16,
+    pub(in crate::session) end: u16,
+    pub(in crate::session) hit: Hit,
+}
+
+/// The frame without its marks, and where each marked run sits. A run whose end the clip cut
+/// off runs to the end of its line.
+pub(in crate::session) fn zones(frame: &str) -> (String, Vec<Zone>) {
+    let mut text = String::with_capacity(frame.len());
+    let mut zones = Vec::new();
+    for (row, line) in frame.split('\n').enumerate() {
+        if row > 0 {
+            text.push('\n');
+        }
+        let row = row as u16;
+        let mut open: Vec<(Option<Hit>, u16)> = Vec::new();
+        let mut col = 0u16;
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\u{1b}' {
+                text.push(ch);
+                col = col.saturating_add(1);
+                continue;
+            }
+            let mut seq = String::from(ch);
+            for ch in chars.by_ref() {
+                seq.push(ch);
+                if ch == 'm' {
+                    break;
+                }
+            }
+            if let Some(code) = seq.strip_prefix("\u{1b}[>") {
+                open.push((Hit::parse(code.trim_end_matches('m')), col));
+            } else if seq == MARK_END {
+                if let Some((Some(hit), start)) = open.pop() {
+                    zones.push(Zone {
+                        row,
+                        start,
+                        end: col,
+                        hit,
+                    });
+                }
+            } else {
+                text.push_str(&seq);
+            }
+        }
+        zones.extend(open.into_iter().filter_map(|(hit, start)| {
+            Some(Zone {
+                row,
+                start,
+                end: u16::MAX,
+                hit: hit?,
+            })
+        }));
+    }
+    (text, zones)
+}
+
+/// What is under `(col, row)`, innermost first: a key before the lower panel around it.
+pub(in crate::session) fn hits_at(zones: &[Zone], col: u16, row: u16) -> Vec<&Hit> {
+    let mut under: Vec<&Zone> = zones
+        .iter()
+        .filter(|zone| zone.row == row && (zone.start..zone.end).contains(&col))
+        .collect();
+    under.sort_by_key(|zone| zone.end - zone.start);
+    under.into_iter().map(|zone| &zone.hit).collect()
+}
+
 pub(super) struct Definition {
     pub(super) rows_n: u8,
     pub(super) cols_n: u8,
@@ -373,7 +550,7 @@ fn seg(text: impl Into<String>, bg: Rgb, fg: Rgb, bold: bool) -> Seg {
 }
 
 fn seg_width(segs: &[Seg]) -> usize {
-    segs.iter().map(|(text, ..)| text.chars().count()).sum()
+    segs.iter().map(|(text, ..)| visible_len(text)).sum()
 }
 
 /// `left`, bar fill, `right`, exactly `cols` wide. `right` drops first, then `left` clips.
@@ -424,7 +601,7 @@ fn header_line(header: &Header, cols: usize) -> String {
     }
     let room = cols.saturating_sub(seg_width(&left) + seg_width(&right) + 2);
     let tab = |index: usize| {
-        let name = format!(" {} ", header.tabs[index]);
+        let name = mark(&Hit::Tab(index), &format!(" {} ", header.tabs[index]));
         if index == header.active {
             seg(name, SELECTED_BG, SELECTED_FG, true)
         } else {
@@ -471,7 +648,7 @@ fn status_line(mode: Mode, status: &[Seg], cols: usize) -> String {
     let mut left = vec![seg(format!(" {} ", mode.label), badge, SELECTED_FG, true)];
     left.push(seg(" ", BAR, TEXT, false));
     left.extend(status.iter().cloned());
-    let right = [seg(" ? help ", BAR, DIM, false)];
+    let right = [seg(mark(&Hit::Help, " ? help "), BAR, DIM, false)];
     bar_line(&left, &right, cols)
 }
 
@@ -486,8 +663,9 @@ fn footer_line(hints: &[(String, &str)], cols: usize) -> String {
             break;
         }
         line.push_str(gap);
-        line.push_str(&paint(&format!(" {keys} "), KEY_FACE, TEXT, true));
-        line.push_str(&dye(&format!(" {label}"), DIM, false));
+        let chip = paint(&format!(" {keys} "), KEY_FACE, TEXT, true);
+        let hint = chip + &dye(&format!(" {label}"), DIM, false);
+        line.push_str(&mark(&Hit::Hint(index), &hint));
         used += width;
     }
     line
@@ -574,14 +752,13 @@ fn detail_lines(detail: &Detail, width: usize) -> Vec<String> {
         for (index, (legend, here, changed)) in detail.layers.iter().enumerate() {
             let name = format!("L{index} ");
             let chip = format!(" {legend} ");
-            if *here {
-                row.push_str(&dye(&name, TEXT, true));
-                row.push_str(&paint(&chip, SELECTED_BG, SELECTED_FG, true));
+            let drawn = if *here {
+                dye(&name, TEXT, true) + &paint(&chip, SELECTED_BG, SELECTED_FG, true)
             } else {
-                row.push_str(&dye(&name, DIM, false));
                 let fg = if *changed { CHANGED } else { TEXT };
-                row.push_str(&paint(&chip, KEY_FACE, fg, *changed));
-            }
+                dye(&name, DIM, false) + &paint(&chip, KEY_FACE, fg, *changed)
+            };
+            row.push_str(&mark(&Hit::Layer(index as u8), &drawn));
             row.push_str("  ");
         }
         lines.push(row);
@@ -797,14 +974,15 @@ fn compose(top: Top<'_>, frame: Frame<'_>) -> String {
         } else {
             cols
         };
-        lines.extend(panel(
+        let panel = panel(
             lower_title(&lower),
             &lower_body(&lower, spent.lower_body, lower_cols),
             lower_boxed,
             lower_side,
             true,
             cols,
-        ));
+        );
+        lines.extend(panel.iter().map(|line| mark(&Hit::Lower, line)));
     }
     if spent.status {
         lines.push(status_line(mode, &status, width));
@@ -937,7 +1115,10 @@ fn sheet_lines(sheet: &Sheet, room: usize, width: usize) -> Vec<String> {
                 } else {
                     widths[col]
                 };
-                sheet_chip(cell, w, here && col == sheet.col)
+                mark(
+                    &Hit::Cell(index, col),
+                    &sheet_chip(cell, w, here && col == sheet.col),
+                )
             })
             .collect();
         if ragged && here {
@@ -1080,19 +1261,20 @@ fn columns_body(
                 continue;
             };
             let on = column.selected == Some(at);
-            let mark = if on { "› " } else { "  " };
-            let name: String = format!("{mark}{}", hit.legend)
+            let arrow = if on { "› " } else { "  " };
+            let name: String = format!("{arrow}{}", hit.legend)
                 .chars()
                 .take(cw - 1)
                 .collect();
             let left = cw - 1 - name.chars().count();
             let about: String = format!("  {}", hit.token).chars().take(left).collect();
             let about = pad_visible(&about, left);
-            line.push_str(&if on && index == active {
+            let cell = if on && index == active {
                 dye_bg(&format!("{name}{about}"), SELECTED_FG, SELECTED_BG)
             } else {
                 format!("{}{}", dye(&name, TEXT, on), dye(&about, DIM, false))
-            });
+            };
+            line.push_str(&mark(&Hit::Part(index, at), &cell));
             line.push(' ');
         }
         out.push(line);
@@ -1150,7 +1332,10 @@ fn pick_cards(
         }
         out.push(format!(
             "{pad}{}",
-            fill_line(&[edge.clone(), name], &[side], inner, bg)
+            mark(
+                &Hit::Card(index),
+                &fill_line(&[edge.clone(), name], &[side], inner, bg)
+            )
         ));
         // The reason gets the whole second line: beside the name, a long one did not fit and
         // was dropped, so a failed open looked like nothing happened.
@@ -1175,7 +1360,8 @@ fn pick_cards(
             (None, Some(why)) => vec![edge, seg(format!("✕ {why}"), bg, UNLOCK, true)],
             (None, None) => vec![edge, seg(ids, bg, DIM, false)],
         };
-        out.push(format!("{pad}{}", fill_line(&detail, &[], inner, bg)));
+        let detail = fill_line(&detail, &[], inner, bg);
+        out.push(format!("{pad}{}", mark(&Hit::Card(index), &detail)));
     }
     out
 }
@@ -1228,8 +1414,10 @@ fn search_grid(hits: &[Found], cursor: usize, room: usize, width: usize) -> Vec<
             (0..across)
                 .filter_map(|column| {
                     let index = row * across + column;
-                    hits.get(index)
-                        .map(|hit| hit_cell(hit, index == cursor, legend_w, token_w, cell))
+                    hits.get(index).map(|hit| {
+                        let cell = hit_cell(hit, index == cursor, legend_w, token_w, cell);
+                        mark(&Hit::Pick(index), &cell)
+                    })
                 })
                 .collect()
         })
@@ -1470,8 +1658,11 @@ fn basic_body(
             }
             let text = center(legend, face);
             line.push_str(&match key.hit {
-                Some(index) if index == cursor => paint(&text, SELECTED_BG, SELECTED_FG, true),
-                Some(_) => paint(&text, KEY_FACE, TEXT, false),
+                Some(index) if index == cursor => mark(
+                    &Hit::Pick(index),
+                    &paint(&text, SELECTED_BG, SELECTED_FG, true),
+                ),
+                Some(index) => mark(&Hit::Pick(index), &paint(&text, KEY_FACE, TEXT, false)),
                 None => paint(&text, KEY_FACE, DIM, false),
             });
             line.push(' ');
@@ -1493,11 +1684,12 @@ fn basic_body(
             let mut line = String::from(" ");
             for &index in plan.rest.iter().skip(row * across).take(across) {
                 let text = center(&hits[index].legend, cell - 1);
-                line.push_str(&if index == cursor {
+                let cap = if index == cursor {
                     paint(&text, SELECTED_BG, SELECTED_FG, true)
                 } else {
                     paint(&text, KEY_FACE, TEXT, false)
-                });
+                };
+                line.push_str(&mark(&Hit::Pick(index), &cap));
                 line.push(' ');
             }
             out.push(line);
@@ -1606,14 +1798,14 @@ fn top_rule(title: &str, cols: usize) -> String {
         return String::new();
     }
     let room = cols.saturating_sub(5);
-    // Slide a too-wide title left so a bracketed active shelf stays on screen.
-    let end = title.chars().position(|c| c == ']').map_or(0, |at| at + 1);
-    let title: String = title
+    // Slide a too-wide title left so a bracketed active shelf stays on screen. The shelf names
+    // carry marks, so this counts what shows.
+    let end = visible_text(title)
         .chars()
-        .skip(end.saturating_sub(room))
-        .take(room)
-        .collect();
-    let dashes = cols.saturating_sub(title.chars().count() + 5);
+        .position(|c| c == ']')
+        .map_or(0, |at| at + 1);
+    let title = take_visible(&skip_visible(title, end.saturating_sub(room)), room);
+    let dashes = cols.saturating_sub(visible_len(&title) + 5);
     format!("╭─ {title} {}╮", "─".repeat(dashes))
 }
 
@@ -1733,7 +1925,10 @@ fn paint_row(caps: &[&Cap], cols: u16, min_x: f64, unit: usize) -> [String; 3] {
             continue;
         }
         let drawn = drawn_width(cap.w, unit).min(width - column);
-        let cells = filled(cap, drawn);
+        let cells = filled(cap, drawn).map(|cell| match cap.place {
+            Some(place) => mark(&Hit::Key(place), &cell),
+            None => cell,
+        });
         for (line, cell) in lines.iter_mut().zip(cells) {
             place(line, column, &cell, width);
         }
@@ -1930,6 +2125,37 @@ fn visible_len(text: &str) -> usize {
 fn take_visible(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut seen = 0usize;
+    let mut styled = false;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            let mut seq = String::from(ch);
+            for ch in chars.by_ref() {
+                seq.push(ch);
+                if ch == 'm' {
+                    break;
+                }
+            }
+            styled |= !is_mark(&seq);
+            out.push_str(&seq);
+            continue;
+        }
+        // Past the edge, escapes still come through, so a clipped mark keeps its end.
+        if seen < width {
+            out.push(ch);
+            seen += 1;
+        }
+    }
+    if styled && !out.ends_with("\u{1b}[0m") {
+        out.push_str("\u{1b}[0m");
+    }
+    out
+}
+
+/// `text` without its first `count` visible characters; escapes stay.
+fn skip_visible(text: &str, count: usize) -> String {
+    let mut out = String::new();
+    let mut skipped = 0usize;
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
@@ -1940,18 +2166,27 @@ fn take_visible(text: &str, width: usize) -> String {
                     break;
                 }
             }
-            continue;
+        } else if skipped < count {
+            skipped += 1;
+        } else {
+            out.push(ch);
         }
-        if seen >= width {
-            break;
-        }
-        out.push(ch);
-        seen += 1;
-    }
-    if out.contains('\u{1b}') && !out.ends_with("\u{1b}[0m") {
-        out.push_str("\u{1b}[0m");
     }
     out
+}
+
+/// What `text` shows, escapes taken out.
+pub(super) fn visible_text(text: &str) -> String {
+    text.split('\u{1b}')
+        .enumerate()
+        .map(|(at, part)| {
+            if at == 0 {
+                part
+            } else {
+                part.split_once('m').map_or("", |(_, rest)| rest)
+            }
+        })
+        .collect()
 }
 
 pub(in crate::session) fn clip(lines: &[String], cols: u16, rows: u16) -> String {
@@ -2042,9 +2277,17 @@ fn popup_box(popup: &Popup, cols: usize, rows: usize) -> Vec<Vec<Cell>> {
         true,
     ))];
     out.push(side(gap(inner)));
-    for line in shown {
+    let first = scroll.min(total);
+    for (at, line) in shown.iter().enumerate() {
+        // Choices count over the whole body, so a click names the same one however it scrolls.
+        let choice = matches!(line, PopupLine::Choice(..)).then(|| {
+            lines[..first + at]
+                .iter()
+                .filter(|line| matches!(line, PopupLine::Choice(..)))
+                .count()
+        });
         let mut row = gap(POPUP_PAD);
-        row.extend(popup_line(line, key_w, body_w, accent));
+        row.extend(popup_line(line, key_w, body_w, accent, choice));
         row.extend(gap(POPUP_PAD));
         out.push(side(row));
     }
@@ -2115,7 +2358,13 @@ fn popup_bottom(position: Option<&str>, width: usize) -> String {
 }
 
 /// One body line, exactly `width` cells on the popup background.
-fn popup_line(line: &PopupLine, key_w: usize, width: usize, accent: Rgb) -> Vec<Cell> {
+fn popup_line(
+    line: &PopupLine,
+    key_w: usize,
+    width: usize,
+    accent: Rgb,
+    choice: Option<usize>,
+) -> Vec<Cell> {
     let segments: Vec<(String, Rgb, bool)> = match line {
         PopupLine::Blank => Vec::new(),
         PopupLine::Heading(text) => vec![(text.to_uppercase(), accent, true)],
@@ -2136,14 +2385,20 @@ fn popup_line(line: &PopupLine, key_w: usize, width: usize, accent: Rgb) -> Vec<
             vec![("  ".to_string(), DIM, false), (text.clone(), DIM, false)]
         }
     };
-    let mut row = Vec::new();
+    let mut used = 0;
+    let mut painted = String::new();
     for (text, fg, bold) in segments {
-        let text: String = text.chars().take(width.saturating_sub(row.len())).collect();
-        row.extend(cells_of(&paint(&text, POPUP, fg, bold)));
+        let text: String = text.chars().take(width.saturating_sub(used)).collect();
+        used += text.chars().count();
+        painted.push_str(&paint(&text, POPUP, fg, bold));
     }
+    if let Some(choice) = choice {
+        painted = mark(&Hit::Choice(choice), &painted);
+    }
+    let mut row = cells_of(&painted);
     row.extend(cells_of(&fill(
         "",
-        width.saturating_sub(row.len()),
+        width.saturating_sub(used),
         POPUP,
         TEXT,
         false,
@@ -2158,13 +2413,9 @@ fn action_chips(actions: &[(&str, &str)], accent: Rgb) -> Vec<Cell> {
         if index > 0 {
             row.extend(cells_of(&fill("", 3, POPUP, TEXT, false)));
         }
-        row.extend(cells_of(&paint(
-            &format!(" {key} "),
-            accent,
-            SELECTED_FG,
-            true,
-        )));
-        row.extend(cells_of(&paint(&format!(" {label}"), POPUP, TEXT, false)));
+        let chip = paint(&format!(" {key} "), accent, SELECTED_FG, true)
+            + &paint(&format!(" {label}"), POPUP, TEXT, false);
+        row.extend(cells_of(&mark(&Hit::Chip((*key).to_string()), &chip)));
     }
     row
 }
@@ -2182,6 +2433,9 @@ fn paint(text: &str, bg: Rgb, fg: Rgb, bold: bool) -> String {
 struct Cell {
     ch: char,
     style: String,
+    /// Marks that open or close just before this cell, and, on a line's last cell, after it.
+    mark: String,
+    after: String,
 }
 
 /// Dims the frame, then lays `popup` in the middle, or near the top when `pinned`, with a
@@ -2195,11 +2449,16 @@ fn stamp(frame: &str, popup: &[Vec<Cell>], cols: usize, rows: usize, pinned: boo
     let blank = Cell {
         ch: ' ',
         style: String::new(),
+        mark: String::new(),
+        after: String::new(),
     };
+    // A popup takes the clicks: what it covers, dimmed, has no marks left.
     for row in &mut grid {
         row.resize(cols, blank.clone());
         for cell in row.iter_mut() {
             cell.style = dim_style(&cell.style);
+            cell.mark.clear();
+            cell.after.clear();
         }
     }
     let box_h = popup.len();
@@ -2277,7 +2536,8 @@ fn dim_style(style: &str) -> String {
 
 fn cells_of(line: &str) -> Vec<Cell> {
     let mut style = String::new();
-    let mut out = Vec::new();
+    let mut mark = String::new();
+    let mut out: Vec<Cell> = Vec::new();
     let mut chars = line.chars();
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' {
@@ -2288,7 +2548,9 @@ fn cells_of(line: &str) -> Vec<Cell> {
                     break;
                 }
             }
-            if seq == "\u{1b}[0m" || seq == "\u{1b}[m" {
+            if is_mark(&seq) {
+                mark.push_str(&seq);
+            } else if seq == "\u{1b}[0m" || seq == "\u{1b}[m" {
                 style.clear();
             } else {
                 style = seq;
@@ -2298,7 +2560,12 @@ fn cells_of(line: &str) -> Vec<Cell> {
         out.push(Cell {
             ch,
             style: style.clone(),
+            mark: std::mem::take(&mut mark),
+            after: String::new(),
         });
+    }
+    if let Some(last) = out.last_mut() {
+        last.after = mark;
     }
     out
 }
@@ -2314,7 +2581,9 @@ fn paint_cells(row: &[Cell]) -> String {
             out.push_str(&cell.style);
             current.clone_from(&cell.style);
         }
+        out.push_str(&cell.mark);
         out.push(cell.ch);
+        out.push_str(&cell.after);
     }
     if !current.is_empty() {
         out.push_str("\u{1b}[0m");

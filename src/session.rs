@@ -30,6 +30,22 @@ pub enum Event {
     Quit,
     /// Ctrl-K: find anything. Space does the same on the board and the editor tabs.
     Palette,
+    /// A mouse button or wheel at a screen cell, 0-based.
+    Mouse {
+        button: Mouse,
+        col: u16,
+        row: u16,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mouse {
+    /// The left button: select what is under it; on what is already selected, open or stage it.
+    Click,
+    /// The right button: back, as Esc.
+    Back,
+    WheelUp,
+    WheelDown,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,12 +69,14 @@ enum Kind {
     Pick(Vec<vial::Candidate>),
 }
 
-/// The product loop. `app` can call `start`, `handle`, and `text`.
+/// The product loop. `app` can call `start`, `handle`, and `frame`.
 pub(crate) struct Model {
     kind: ModelKind,
     /// One line for the last thing that happened: a save, a refusal, an unknown command.
     /// Cleared by the next key.
     notice: Option<String>,
+    /// Where the last frame drew each clickable thing.
+    zones: Vec<vial::Zone>,
 }
 
 enum ModelKind {
@@ -583,7 +601,11 @@ impl Model {
                 failed: None,
             },
         };
-        Self { kind, notice: None }
+        Self {
+            kind,
+            notice: None,
+            zones: Vec::new(),
+        }
     }
 
     /// `cols` is the screen width: the key grid moves Up and Down a whole row of it.
@@ -601,7 +623,14 @@ impl Model {
                 return Ok(Step::Continue);
             }
         }
-        match keys::act(view_of(&self.kind), &event) {
+        if let Event::Mouse { button, col, row } = event {
+            return self.mouse(button, col, row, cols);
+        }
+        self.act(keys::act(view_of(&self.kind), &event), cols)
+    }
+
+    fn act(&mut self, act: keys::Act, cols: u16) -> Result<Step> {
+        match act {
             keys::Act::Nudge(dir) => self.arrow(dir, cols),
             keys::Act::Palette => self.open_palette(""),
             keys::Act::Shelf(delta) => self.shelf(delta),
@@ -627,8 +656,157 @@ impl Model {
         }
     }
 
-    pub(crate) fn text(&self, cols: u16, rows: u16) -> String {
-        render(&self.kind, self.notice.as_deref(), None, cols, rows)
+    /// The screen, and, kept for the next click, where each clickable thing is on it.
+    pub(crate) fn frame(&mut self, cols: u16, rows: u16) -> String {
+        let (text, zones) = vial::zones(&render(
+            &self.kind,
+            self.notice.as_deref(),
+            None,
+            cols,
+            rows,
+        ));
+        self.zones = zones;
+        text
+    }
+
+    fn mouse(&mut self, button: Mouse, col: u16, row: u16, cols: u16) -> Result<Step> {
+        let hits: Vec<vial::Hit> = vial::hits_at(&self.zones, col, row)
+            .into_iter()
+            .cloned()
+            .collect();
+        match button {
+            Mouse::Back => self.act(keys::act(view_of(&self.kind), &Event::Cancel), cols),
+            Mouse::WheelUp | Mouse::WheelDown => {
+                let down = button == Mouse::WheelDown;
+                let delta = if down { 1 } else { -1 };
+                match &self.kind {
+                    // Over the board the wheel turns the layers; the key list scrolls under it.
+                    ModelKind::Map(_) => self.layer(delta),
+                    ModelKind::Search { .. } if !hits.contains(&vial::Hit::Lower) => {
+                        Ok(Step::Continue)
+                    }
+                    ModelKind::Help { .. } => self.scroll_help(delta),
+                    _ => {
+                        let event = if down { Event::Down } else { Event::Up };
+                        self.act(keys::act(view_of(&self.kind), &event), cols)
+                    }
+                }
+            }
+            Mouse::Click => match hits.into_iter().next() {
+                Some(hit) => self.click(hit, cols),
+                None => Ok(Step::Continue),
+            },
+        }
+    }
+
+    /// Selects what was clicked. A click on what is already selected does what Enter does
+    /// there: opens the key list, edits the cell, opens the board, stages the pick.
+    fn click(&mut self, hit: vial::Hit, cols: u16) -> Result<Step> {
+        use vial::Hit;
+        let view = view_of(&self.kind);
+        match hit {
+            Hit::Help if matches!(self.kind, ModelKind::Help { .. }) => return self.close_help(),
+            Hit::Help => return self.open_help(),
+            Hit::Hint(index) => {
+                return match keys::footer_act(view, index) {
+                    Some(act) => self.act(act, cols),
+                    None => Ok(Step::Continue),
+                }
+            }
+            Hit::Chip(key) => {
+                let event = match key.as_str() {
+                    "enter" => Event::Confirm,
+                    "esc" => Event::Cancel,
+                    "tab" => Event::Tab,
+                    one if one.chars().count() == 1 => {
+                        Event::Char(one.chars().next().unwrap_or(' '))
+                    }
+                    _ => return Ok(Step::Continue),
+                };
+                return self.act(keys::act(view, &event), cols);
+            }
+            Hit::Tab(index) if matches!(self.kind, ModelKind::Map(_) | ModelKind::Sheet { .. }) => {
+                return self.tab_to(|_, _| index)
+            }
+            _ => {}
+        }
+        let again = match (&mut self.kind, hit) {
+            (ModelKind::Pick { cursor, .. }, Hit::Card(index))
+            | (
+                ModelKind::Lost {
+                    cursor,
+                    reconnect: None,
+                    ..
+                },
+                Hit::Choice(index),
+            ) => mem::replace(cursor, index) == index,
+            (ModelKind::Map(session), Hit::Key(place)) => {
+                session.selection.replace(place) == Some(place)
+            }
+            (ModelKind::Map(session), Hit::Layer(layer)) => {
+                session.layer = layer;
+                false
+            }
+            (ModelKind::Sheet { session, spot }, Hit::Cell(row, col)) => {
+                let again = spot.row == row && spot.col == col;
+                spot.row = row;
+                spot.col = col;
+                clamp_col(&session.board, spot);
+                again
+            }
+            (
+                ModelKind::Search {
+                    session,
+                    browse,
+                    cursor,
+                    ..
+                },
+                hit,
+            ) => match (&mut *browse, hit) {
+                (Browse::Shelf(ShelfIndex(at)), Hit::Shelf(shelf)) => {
+                    let delta = shelf as isize - *at as isize;
+                    *browse = Browse::Shelf(ShelfIndex(*at))
+                        .shift_shelf(delta as i8, session.board.shelf_count());
+                    *cursor = 0;
+                    false
+                }
+                (Browse::Part { parts, .. }, Hit::Part(column, index)) => {
+                    let again = parts.at == column && *cursor == index;
+                    let delta = column as isize - parts.at as isize;
+                    if delta != 0 {
+                        shift_column(session, browse, cursor, delta as i8);
+                    }
+                    *cursor = index;
+                    follow(session, browse, index);
+                    again
+                }
+                (Browse::Part { .. }, _) => false,
+                (_, Hit::Pick(index)) => mem::replace(cursor, index) == index,
+                _ => false,
+            },
+            (
+                ModelKind::Palette {
+                    session,
+                    text,
+                    cursor,
+                    ..
+                },
+                Hit::Choice(index),
+            ) => {
+                // The popup lists a window of the rows; its first is where `palette_popup` starts.
+                let len = palette(&session.board, text).len();
+                let pick = palette_pick(text, len, *cursor);
+                let row = pick.unwrap_or(0).saturating_sub(PALETTE_ROWS - 1) + index;
+                *cursor = Some(row);
+                pick == Some(row)
+            }
+            _ => false,
+        };
+        if again {
+            self.confirm()
+        } else {
+            Ok(Step::Continue)
+        }
     }
 
     /// `q`, `:q`, or Ctrl-C. Unsaved changes ask first; asking again quits.
@@ -1123,6 +1301,13 @@ impl Model {
             }
             return Ok(Step::Continue);
         }
+        self.tab_to(|at, count| {
+            (at as isize + isize::from(delta)).rem_euclid(count as isize) as usize
+        })
+    }
+
+    /// To the tab `pick` chooses from the current one and the count.
+    fn tab_to(&mut self, pick: impl FnOnce(usize, usize) -> usize) -> Result<Step> {
         let (mut session, at) = match mem::replace(&mut self.kind, vacant()) {
             ModelKind::Map(session) => {
                 let at = usize::from(session.layer);
@@ -1142,7 +1327,7 @@ impl Model {
         let layers = usize::from(session.board.layer_count());
         let editors = session.board.editors();
         let count = (layers + editors.len()).max(1);
-        let next = (at as isize + isize::from(delta)).rem_euclid(count as isize) as usize;
+        let next = pick(at, count).min(count - 1);
         self.kind = if next < layers {
             session.layer = next as u8;
             ModelKind::Map(session)

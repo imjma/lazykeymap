@@ -280,11 +280,12 @@ fn shelf_title(shelves: &[Shelf], index: usize) -> String {
         .iter()
         .enumerate()
         .map(|(place, shelf)| {
-            if place == index {
+            let name = if place == index {
                 format!("[{}]", shelf.name)
             } else {
                 shelf.name.to_string()
-            }
+            };
+            super::layout::mark(&super::layout::Hit::Shelf(place), &name)
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -664,7 +665,7 @@ mod tests {
             .collect();
         assert_eq!(legends, entries);
         assert_eq!(
-            list(&table, Range::Shelf(0)).title,
+            super::super::layout::visible_text(&list(&table, Range::Shelf(0)).title),
             "[Basic] ISO/JIS Layers Quantum Backlight App, Media and Mouse MIDI Tap Dance User Macro"
         );
         let user = list(&table, Range::Shelf(8));

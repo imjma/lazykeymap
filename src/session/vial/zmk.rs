@@ -2405,7 +2405,7 @@ mod tests {
             for _ in 0..10 {
                 model.handle(crate::Event::Tick, 80).unwrap();
             }
-            plain(&model.text(80, 20))
+            plain(&model.frame(80, 20))
         };
         // Even one board waits for Enter on its card.
         let text = ticks(&mut model);
@@ -2538,7 +2538,7 @@ mod tests {
         for _ in 0..50 {
             model.handle(crate::Event::Tick, 80).unwrap();
         }
-        plain(&model.text(80, 20))
+        plain(&model.frame(80, 20))
     }
 
     fn plain(text: &str) -> String {
@@ -2594,7 +2594,7 @@ mod tests {
         for _ in 0..50 {
             model.handle(crate::Event::Tick, 80).unwrap();
         }
-        let text = plain(&model.text(80, 20));
+        let text = plain(&model.frame(80, 20));
         let ids: Vec<u32> = fw.borrow().layers.iter().map(|l| l.0).collect();
         assert_eq!(ids, [BASE, UPPER]);
         assert!(text.contains("layer 0/2"), "{text}");

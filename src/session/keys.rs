@@ -1194,7 +1194,7 @@ fn key_of(event: &Event) -> Option<Key> {
         Event::BackTab => Key::BackTab,
         Event::Char(ch) => Key::Char(*ch),
         Event::Palette => Key::Palette,
-        Event::Tick | Event::Quit => return None,
+        Event::Tick | Event::Quit | Event::Mouse { .. } => return None,
     })
 }
 
@@ -1233,6 +1233,22 @@ pub(super) fn footer(view: View) -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// What clicking the `index`th options-bar hint does: its act, when every key it merges does the
+/// same thing (`h/j/k/l move` does four things, so it is not a button).
+pub(super) fn footer_act(view: View, index: usize) -> Option<Act> {
+    let (_, label) = footer(view).into_iter().nth(index)?;
+    // `←→↑↓ move` stands for four arrows, whatever its one row says.
+    if label == "move" {
+        return None;
+    }
+    let mut acts = ROWS
+        .iter()
+        .filter(|row| row.view == view && row.show && row.label == label)
+        .map(|row| row.act);
+    let act = acts.next()?;
+    acts.all(|other| other == act).then_some(act)
+}
+
 /// The help popup body: the group names, then each group, the current view first.
 pub(super) fn cheatsheet(current: View) -> Vec<PopupLine> {
     let views = [
@@ -1260,10 +1276,24 @@ pub(super) fn cheatsheet(current: View) -> Vec<PopupLine> {
             ordered.push(view);
         }
     }
-    for view in ordered {
+    for (at, view) in ordered.into_iter().enumerate() {
         lines.push(PopupLine::Blank);
         lines.push(PopupLine::Heading(title(view).to_string()));
         lines.extend(group(view));
+        // The mouse works in every view, so it follows the one on screen.
+        if at == 0 {
+            lines.push(PopupLine::Blank);
+            lines.push(PopupLine::Heading("mouse".to_string()));
+            for (what, does) in [
+                ("click", "select a key, cell, tab, or hint"),
+                ("click again", "open the key list, or stage the pick"),
+                ("wheel", "change layer on the board, scroll a list"),
+                ("right-click", "back, as esc"),
+                ("shift-drag", "select text, as without the mouse"),
+            ] {
+                lines.push(PopupLine::Pair(what.to_string(), does.to_string()));
+            }
+        }
     }
     lines
 }

@@ -812,3 +812,68 @@ fn the_key_list_opens_on_the_keys_own_keycode() -> lazykeymap::Result<()> {
     assert!(text.contains("Esc → Esc"), "{text}");
     Ok(())
 }
+
+/// Presses `button` on the first place the screen shows `needle`, as a person aims at it.
+fn mouse_at(
+    app: &mut lazykeymap::App<lazykeymap::TestScreen>,
+    needle: &str,
+    button: lazykeymap::Mouse,
+) -> lazykeymap::Result<()> {
+    let mut plain = String::new();
+    let mut chars = app.screen().text().chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            chars.by_ref().find(|c| *c == 'm');
+        } else {
+            plain.push(ch);
+        }
+    }
+    let (row, line) = plain
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(needle))
+        .unwrap_or_else(|| panic!("no {needle:?} in\n{plain}"));
+    let col = line[..line.find(needle).unwrap_or(0)].chars().count();
+    app.handle(lazykeymap::Event::Mouse {
+        button,
+        col: col as u16,
+        row: row as u16,
+    })?;
+    Ok(())
+}
+
+#[test]
+fn a_click_selects_and_a_second_click_opens_or_stages() -> lazykeymap::Result<()> {
+    use lazykeymap::Mouse::{Back, Click, WheelUp};
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(100, 30));
+    // The one key is already selected, so a click on it opens the key list.
+    mouse_at(&mut app, "▌  NO", Click)?;
+    assert!(app.screen().text().contains("SEARCH"));
+    // A key on the Basic keyboard previews; the same key again stages it.
+    mouse_at(&mut app, "Q    W", Click)?;
+    assert!(app.screen().text().contains("NO → Q"));
+    mouse_at(&mut app, "Q    W", Click)?;
+    let text = app.screen().text();
+    assert!(
+        text.contains("KEYMAP") && text.contains("1 unsaved"),
+        "{text}"
+    );
+    // A group named in the title switches to it.
+    mouse_at(&mut app, "▌  Q", Click)?;
+    mouse_at(&mut app, "ISO/JIS", Click)?;
+    assert!(app.screen().text().contains("[ISO/JIS]"));
+    // The wheel scrolls the list under it, not the board above it.
+    let before = app.screen().text().to_string();
+    mouse_at(&mut app, "▌", WheelUp)?;
+    assert_eq!(app.screen().text(), before);
+    // Right-click is Esc.
+    mouse_at(&mut app, "ISO/JIS", Back)?;
+    assert!(app.screen().text().contains("KEYMAP"));
+    // The status bar's help opens help; its esc chip closes it.
+    mouse_at(&mut app, "? help", Click)?;
+    assert!(app.screen().text().contains("╭─ help"));
+    mouse_at(&mut app, "esc  close", Click)?;
+    assert!(!app.screen().text().contains("╭─ help"));
+    Ok(())
+}

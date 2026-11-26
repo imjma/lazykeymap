@@ -49,4 +49,4 @@ impl std::error::Error for Error {}
 
 pub use app::{App, Screen, TestScreen};
 pub use session::vial::MemoryBoard;
-pub use session::{attach, attach_file, attach_port, Attached, Event, Step};
+pub use session::{attach, attach_file, attach_port, Attached, Event, Mouse, Step};
