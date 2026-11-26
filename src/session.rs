@@ -765,7 +765,7 @@ impl Model {
             self.kind = back_to(session, back);
             return Ok(Step::Continue);
         }
-        self.reread(session, back, land)
+        self.reread(session, land)
     }
 
     /// `:layout` lists physical layouts; `:layout 1` or `:layout five` switches and re-reads.
@@ -810,16 +810,11 @@ impl Model {
             return Ok(Step::Continue);
         }
         self.notice = Some(format!("layout {index} {}", names[index]));
-        self.reread(session, back, land)
+        self.reread(session, land)
     }
 
     /// Reads the open keyboard again and lands on `land`.
-    fn reread(
-        &mut self,
-        session: Session<Mapping>,
-        back: Option<vial::Spot>,
-        land: u8,
-    ) -> Result<Step> {
+    fn reread(&mut self, session: Session<Mapping>, land: u8) -> Result<Step> {
         let candidate = session.board.reopen();
         match vial::Load::begin(&candidate) {
             Ok(load) => {
