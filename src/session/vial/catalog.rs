@@ -226,9 +226,15 @@ fn rows(table: &[(&str, &str, u16)]) -> Vec<Entry> {
 }
 
 fn entry(token: &str, legend: &str, code: u16) -> Entry {
+    // One-shot mods read as the rest do: `OSM(LCtl+Sft)`, not the table's `OSM LCS`.
+    let legend = if (0x52A0..0x52C0).contains(&code) {
+        format!("OSM({})", mod_name(code & 0x1F))
+    } else {
+        legend.to_string()
+    };
     Entry {
         token: token.to_string(),
-        legend: legend.to_string(),
+        legend,
         code,
         // QMK's QK_BOOT. The flag, not the number, is what begin_hold checks.
         hold_first: token == "QK_BOOTLOADER",
@@ -364,9 +370,10 @@ pub(super) fn kind(code: u16) -> String {
 /// Short name for a composite QMK code the table does not list one by one.
 fn compose(table: &Table, code: u16) -> Option<String> {
     let tap = code & 0xFF;
+    // A key with modifiers held, `LGui+C`; a mod-tap, `RGui(J)`: the modifier over the tap.
     if (0x0100..0x2000).contains(&code) {
         let mods = (code >> 8) & 0x1F;
-        return Some(format!("{}-{}", mod_name(mods), legend(table, tap)));
+        return Some(format!("{}+{}", mod_name(mods), legend(table, tap)));
     }
     if (0x2000..0x4000).contains(&code) {
         let mods = (code >> 8) & 0x1F;
@@ -374,7 +381,7 @@ fn compose(table: &Table, code: u16) -> Option<String> {
     }
     if (0x4000..0x5000).contains(&code) {
         let layer = (code >> 8) & 0x0F;
-        return Some(format!("L{layer}({})", legend(table, tap)));
+        return Some(format!("LT{layer}({})", legend(table, tap)));
     }
     if (0x5700..0x5800).contains(&code) {
         return Some(format!("TD({})", code & 0xFF));
@@ -414,20 +421,20 @@ pub(super) fn tone(code: u16) -> Tone {
     Tone::Key
 }
 
+/// QMK's five mod bits as Vial names them: `LGui`, `RCtl`, `LCtl+Sft`; `Meh` and `Hyper` for
+/// their left-hand sets.
 fn mod_name(mask: u16) -> String {
-    match mask {
-        0x01 => "C".to_string(),
-        0x02 => "S".to_string(),
-        0x04 => "A".to_string(),
-        0x08 => "G".to_string(),
-        0x11 => "Rc".to_string(),
-        0x12 => "Rs".to_string(),
-        0x14 => "Ra".to_string(),
-        0x18 => "Rg".to_string(),
-        0x03 => "CS".to_string(),
-        0x07 => "Meh".to_string(),
-        0x0F => "Hyper".to_string(),
-        other => format!("{other:02X}"),
+    let side = if mask & 0x10 == 0 { "L" } else { "R" };
+    let parts: Vec<&str> = [(0x01, "Ctl"), (0x02, "Sft"), (0x04, "Alt"), (0x08, "Gui")]
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+    match (mask & 0x0F, side) {
+        (0x07, "L") => "Meh".to_string(),
+        (0x0F, "L") => "Hyper".to_string(),
+        (0, _) => format!("{mask:02X}"),
+        _ => format!("{side}{}", parts.join("+")),
     }
 }
 
@@ -457,10 +464,18 @@ mod tests {
             .collect()
     }
     #[test]
-    fn composites_use_short_names() {
+    fn composites_name_their_modifiers_in_full() {
         let table = merge(&[], 0, 0, Midi::None, 4, ALL);
-        assert_eq!(legend(&table, 0x2104), "C(A)");
-        assert_eq!(legend(&table, 0x3133), "Rc(;)");
+        // Mod-taps: the modifier over the tap, by Vial's names, not `C(A)` or `Rc(;)`.
+        assert_eq!(legend(&table, 0x2104), "LCtl(A)");
+        assert_eq!(legend(&table, 0x3133), "RCtl(;)");
+        assert_eq!(legend(&table, 0x380D), "RGui(J)");
+        assert_eq!(legend(&table, 0x2704), "Meh(A)");
+        assert_eq!(legend(&table, 0x2304), "LCtl+Sft(A)");
+        // A key with modifiers held, a layer-tap, a one-shot mod.
+        assert_eq!(legend(&table, 0x0806), "LGui+C");
+        assert_eq!(legend(&table, 0x4129), "LT1(Esc)");
+        assert_eq!(legend(&table, 0x52B8), "OSM(RGui)");
         assert_eq!(legend(&table, 0x00A9), "Vol +");
         assert_eq!(legend(&table, 0x0235), "~");
         assert_eq!(legend(&table, 0x5719), "TD(25)");

@@ -578,7 +578,7 @@ fn kc_code_takes_a_basic_key() -> lazykeymap::Result<()> {
     }
     app.handle(lazykeymap::Event::Confirm)?;
     let text = app.screen().text();
-    assert!(text.contains("selected L1(Esc)"), "{text}");
+    assert!(text.contains("selected LT1(Esc)"), "{text}");
     Ok(())
 }
 

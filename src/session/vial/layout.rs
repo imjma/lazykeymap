@@ -1824,7 +1824,7 @@ fn fill(text: &str, width: usize, bg: Rgb, fg: Rgb, bold: bool) -> String {
     )
 }
 
-/// `MO(1)` is header `MO` and main `1`. `C-A` is header `C` and main `A`.
+/// `MO(1)` is header `MO` and main `1`. `LGui+C` is header `LGui+` and main `C`.
 /// A legend with no split stays on the main line. Wider than the cap, it wraps at the space that
 /// fits both halves most evenly, else at the middle.
 fn cap_lines(legend: &str, room: usize) -> (String, String) {
@@ -1844,16 +1844,19 @@ fn cap_lines(legend: &str, room: usize) -> (String, String) {
                     return (top, rest.to_string());
                 }
             }
+            // One long parameter, `OSM(LCtl+Sft)`: the name over it, cut to the cap.
+            if fits(head, room) {
+                return (head.to_string(), main);
+            }
         }
     }
-    if let Some((head, tail)) = legend.split_once('-') {
-        if !head.is_empty()
-            && !tail.is_empty()
-            && !tail.contains('-')
-            && fits(head, room)
-            && fits(tail, room)
-        {
-            return (head.to_string(), tail.to_string());
+    // Modifiers held with a key, `LGui+C`: the modifiers over the key.
+    if let Some((head, tail)) = legend.rsplit_once('+') {
+        if !head.is_empty() && !tail.is_empty() && !tail.contains(' ') && fits(tail, room) {
+            return (
+                format!("{head}+").chars().take(room).collect(),
+                tail.to_string(),
+            );
         }
     }
     if fits(legend, room) {

@@ -96,7 +96,7 @@ fn pick_when_two() -> lazykeymap::Result<()> {
 
 `choose` with one board skips the list and paints the layout. `choose` with none returns `Error::NoBoard`. `attach` paints `choose` whenever at least one board answers; with one name, `Model::start` starts opening it at once, as Enter on its card would, and with several Enter loads the highlighted board. Zero Vial boards return `Error::NoBoard`. One board whose id answers and whose definition does not return `Error::NoLayout`, and the binary prints that error. It does not draw a rectangle of empty keys.
 
-The cap token is the keycode legend. `KC_NO` prints `NO`. `KC_ESC` prints `Esc`. `KC_A` prints `A`. A non-empty KLE label 1 replaces that legend. Tests live next to these fixtures.
+The cap token is the keycode legend. `KC_NO` prints `NO`. `KC_ESC` prints `Esc`. `KC_A` prints `A`. A non-empty KLE label 1 replaces that legend. Composite codes name their modifiers as Vial does (`catalog::mod_name`: `LCtl`, `RGui`, `LCtl+Sft`, `Meh`, `Hyper`): a mod-tap is `RGui(J)`, the modifier over the tap; a key with modifiers held is `LGui+C`, `LGui+` over `C`; a layer-tap is `LT1(Esc)`; a one-shot mod is `OSM(LSft)`. On ZMK a key in modifier functions shows them as symbols, `LG(C)` as `⌘C`, unless QMK names that key itself (`EXCL` is `!`). Tests live next to these fixtures.
 
 Key strings are KLE's serialized legends. The default center-front alignment stores label 8 on the fourth line, label 1 on the ninth line, and label 4 on the tenth line.
 

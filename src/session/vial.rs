@@ -2193,12 +2193,35 @@ impl Board {
     }
 
     /// A key parameter as its cap legend: `Bksp`, `,`, `LShift`. Inside another behavior a bare
-    /// modifier is Keymap Editor's symbol, `mt(⇧ A)`. Anything else, as `LG(C)` or `BT_SEL`,
-    /// stays as written.
+    /// modifier is Keymap Editor's symbol, `mt(⇧ A)`; a key in modifier functions has them as
+    /// symbols, `LG(C)` is `⌘C`. Anything else, as `BT_SEL`, stays as written.
     fn key_legend(&self, word: &str, symbols: bool) -> String {
         let Some(value) = zmk_keys::parse(word) else {
             return word.to_string();
         };
+        let mods = value >> 24;
+        if mods != 0 {
+            // A key QMK lists with its modifier, `EXCL` as `!`, reads as that key.
+            let (left, right) = ((mods & 0x0F) as u16, (mods >> 4) as u16);
+            let mod5 = match (left, right) {
+                (l, 0) => Some(l),
+                (0, r) => Some(r | 0x10),
+                _ => None,
+            };
+            let qmk = mod5.map(|m| m << 8 | (value & 0xFF) as u16);
+            if let Some(qmk) = qmk.filter(|&code| {
+                value >> 16 & 0xFF == 0x07 && catalog::token(&self.catalog, code).is_some()
+            }) {
+                return catalog::legend(&self.catalog, qmk);
+            }
+            let held: String = [(0x11, '⌃'), (0x22, '⇧'), (0x44, '⌥'), (0x88, '⌘')]
+                .iter()
+                .filter(|(bits, _)| mods & bits != 0)
+                .map(|(_, symbol)| *symbol)
+                .collect();
+            let base = zmk_keys::preferred(value & 0x00FF_FFFF).unwrap_or_default();
+            return format!("{held}{}", self.key_legend(&base, false));
+        }
         match (value >> 16, value & 0xFFFF) {
             (0x07, 0xE0 | 0xE4) if symbols => "⌃".to_string(),
             (0x07, 0xE1 | 0xE5) if symbols => "⇧".to_string(),
