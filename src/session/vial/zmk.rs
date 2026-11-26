@@ -2407,7 +2407,14 @@ mod tests {
             }
             plain(&model.text(80, 20))
         };
-        // One board starts opening by itself, and its card waits for the unlock key.
+        // Even one board waits for Enter on its card.
+        let text = ticks(&mut model);
+        assert!(
+            !text.contains("opens by itself") && !text.contains("L1"),
+            "{text}"
+        );
+        // After Enter its card waits for the unlock key, and opens on it with no second Enter.
+        model.handle(crate::Event::Confirm, 80).unwrap();
         let text = ticks(&mut model);
         assert!(text.contains("it opens by itself"), "{text}");
         fw.borrow_mut().locked = false;

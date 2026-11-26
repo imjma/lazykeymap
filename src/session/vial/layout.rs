@@ -1481,16 +1481,41 @@ fn basic_body(
     }
     if !plan.rest.is_empty() && room > out.len() + 1 {
         out.push(String::new());
-        let rest: Vec<Found> = plan.rest.iter().map(|&index| hits[index].clone()).collect();
+        let (cell, across) = rest_caps(&plan.rest, hits, width);
+        let rows = plan.rest.len().div_ceil(across);
+        let down = (room - out.len()).min(rows);
         let on = plan.rest.iter().position(|&index| index == cursor);
-        out.extend(search_grid(
-            &rest,
-            on.unwrap_or(usize::MAX),
-            room - out.len(),
-            width,
-        ));
+        // The row with the cursor stays in view, as in the grid.
+        let first = on.map_or(0, |at| {
+            (at / across).saturating_sub(down / 2).min(rows - down)
+        });
+        for row in first..first + down {
+            let mut line = String::from(" ");
+            for &index in plan.rest.iter().skip(row * across).take(across) {
+                let text = center(&hits[index].legend, cell - 1);
+                line.push_str(&if index == cursor {
+                    paint(&text, SELECTED_BG, SELECTED_FG, true)
+                } else {
+                    paint(&text, KEY_FACE, TEXT, false)
+                });
+                line.push(' ');
+            }
+            out.push(line);
+        }
     }
     out
+}
+
+/// The keys under the Basic keyboard as caps of one width, wide enough for the longest legend
+/// (`TRNS`, `Vol +`): `(cell, caps per row)`.
+fn rest_caps(rest: &[usize], hits: &[Found], width: usize) -> (usize, usize) {
+    let longest = rest
+        .iter()
+        .map(|&index| hits[index].legend.chars().count())
+        .max()
+        .unwrap_or(1);
+    let cell = (longest + 2).clamp(BASIC_UNIT, 12);
+    (cell, (width.saturating_sub(1) / cell).max(1))
 }
 
 /// An arrow on the Basic keyboard: along a row, or to the nearest key above or below; down
@@ -1528,10 +1553,8 @@ pub(in crate::session) fn basic_step(
         return Some(next.unwrap_or(cursor));
     }
     let at = plan.rest.iter().position(|&index| index == cursor)?;
-    let rest: Vec<Found> = plan.rest.iter().map(|&index| hits[index].clone()).collect();
-    let cell = grid_cell(&rest).2;
-    let across = (width / cell).max(1);
-    let last = rest.len() - 1;
+    let (cell, across) = rest_caps(&plan.rest, hits, width);
+    let last = plan.rest.len() - 1;
     let to = match dir {
         Dir::Left => at.saturating_sub(1),
         Dir::Right => (at + 1).min(last),

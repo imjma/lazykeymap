@@ -1215,6 +1215,11 @@ impl Board {
         self.binding_text(self.code_at(layer, place)?)
     }
 
+    /// The keycode a key has in the draft.
+    pub(super) fn key_code(&self, layer: u8, place: Place) -> Option<u16> {
+        self.code_at(layer, place)
+    }
+
     /// Learns the keycode of every binding in the sections, so they show as key legends.
     fn learn_codes(&mut self) {
         let texts: Vec<String> = self

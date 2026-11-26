@@ -575,23 +575,8 @@ impl Model {
     pub(crate) fn start(attached: Attached) -> Self {
         let kind = match attached.kind {
             Kind::Ready(session) => ModelKind::Map(session),
-            // One board opens at once, as Enter on its card would; a locked Studio board then
-            // waits on its card for the unlock key.
-            Kind::Pick(candidates) if candidates.len() == 1 => {
-                match vial::Load::begin(&candidates[0]) {
-                    Ok(load) => ModelKind::Open {
-                        candidates,
-                        cursor: 0,
-                        load,
-                        land: 0,
-                    },
-                    Err(err) => ModelKind::Pick {
-                        candidates,
-                        cursor: 0,
-                        failed: Some((0, why_not(&err))),
-                    },
-                }
-            }
+            // Even one board waits for Enter on its card; a locked Studio board then opens on
+            // its unlock key by itself.
             Kind::Pick(candidates) => ModelKind::Pick {
                 candidates,
                 cursor: 0,
@@ -2095,10 +2080,17 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
 }
 
 /// The key list for a key or cell. On a ZMK board or keymap file it opens on the binding's
-/// last part, as Keymap Editor's parameter chip; on Vial, on the first group.
+/// last part, as Keymap Editor's parameter chip; on Vial, on the first group, with the key's
+/// own keycode highlighted when that group has it.
 fn searching(session: Session<Mapping>, target: Target) -> ModelKind {
     let mut browse = binding_parts(&session, &target).unwrap_or(Browse::Shelf(ShelfIndex(0)));
-    let cursor = land_on(&session, &mut browse);
+    let mut cursor = land_on(&session, &mut browse);
+    if let (Browse::Shelf(_), Target::Key, Some(place)) = (&browse, &target, session.selection) {
+        if let Some(code) = session.board.key_code(session.layer, place) {
+            let hits = session.list(&browse).hits;
+            cursor = hits.iter().position(|hit| hit.code == code).unwrap_or(0);
+        }
+    }
     ModelKind::Search {
         session,
         browse,

@@ -262,7 +262,9 @@ fn key_grid_moves_by_what_is_drawn_and_closes_without_esc() -> lazykeymap::Resul
             .find_map(|(row, line)| line.find(" > ").map(|at| (row, line[..at].chars().count())))
             .expect("a highlighted hit")
     };
+    // The Basic group is a keyboard; the grid is every other group, as ISO/JIS after Tab.
     app.handle(lazykeymap::Event::Char('/'))?;
+    app.handle(lazykeymap::Event::Tab)?;
     let start = marker(&app);
     // Down lands right under it, Right right beside it, and back again.
     app.handle(lazykeymap::Event::Down)?;
@@ -781,7 +783,7 @@ fn the_basic_group_is_a_keyboard_and_arrows_move_on_it() -> lazykeymap::Result<(
     // From `NO` under the keyboard: up is the bottom-row key above it, up again the left Shift,
     // right along the row to Z, then up the stagger (Z sits under the gap of A and S) and back.
     for (event, landed) in [
-        (lazykeymap::Event::Up, "→ LGui"),
+        (lazykeymap::Event::Up, "→ LCtrl"),
         (lazykeymap::Event::Up, "→ LShift"),
         (lazykeymap::Event::Right, "→ Z"),
         (lazykeymap::Event::Up, "→ S"),
@@ -792,5 +794,21 @@ fn the_basic_group_is_a_keyboard_and_arrows_move_on_it() -> lazykeymap::Result<(
         let text = app.screen().text();
         assert!(text.contains(landed), "{landed}: {text}");
     }
+    Ok(())
+}
+
+#[test]
+fn the_key_list_opens_on_the_keys_own_keycode() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(130, 40));
+    app.handle(lazykeymap::Event::Char('/'))?;
+    for ch in "esc".chars() {
+        app.handle(lazykeymap::Event::Char(ch))?;
+    }
+    app.handle(lazykeymap::Event::Confirm)?;
+    // Opening the list again highlights Esc, the key's keycode, on the Basic keyboard.
+    app.handle(lazykeymap::Event::Confirm)?;
+    let text = app.screen().text();
+    assert!(text.contains("Esc → Esc"), "{text}");
     Ok(())
 }
