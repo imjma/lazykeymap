@@ -42,8 +42,6 @@ const CUSTOM_ROOM: usize = 0x200;
 /// More bindings than this from one behavior are not offered in the key list.
 const EXTRAS_PER_BEHAVIOR: usize = 32;
 
-const LOCKED: &str = "locked: press the keyboard's Studio unlock key, then Enter";
-
 /// One Studio call: a subsystem request in, that subsystem's response out.
 trait Rpc {
     fn call(&mut self, subsystem: u64, request: &[u8]) -> Result<Vec<u8>>;
@@ -132,7 +130,7 @@ impl Framed {
             }
             if let Some(meta) = field(answer, 2)? {
                 return Err(match int(meta, 2)? {
-                    Some(1) => Error::Protocol(LOCKED),
+                    Some(1) => Error::Locked,
                     _ => Error::Protocol("the keyboard refused a ZMK Studio request"),
                 });
             }
@@ -704,7 +702,7 @@ impl Zmk {
         let next = match std::mem::replace(&mut self.reading, Reading::Done) {
             Reading::Lock => {
                 if !self.unlocked()? {
-                    return Err(Error::Protocol(LOCKED));
+                    return Err(Error::Locked);
                 }
                 Reading::Behaviors
             }
@@ -2106,7 +2104,7 @@ mod tests {
             let mut fw = self.0.borrow_mut();
             let (tag, value) = fields(request)?.into_iter().next().expect("one request");
             if subsystem != CORE && fw.locked {
-                return Err(Error::Protocol(LOCKED));
+                return Err(Error::Locked);
             }
             let mut out = Vec::new();
             match (subsystem, tag, value) {
@@ -2385,10 +2383,51 @@ mod tests {
     fn a_locked_board_says_how_to_unlock() {
         let fw = firmware();
         fw.borrow_mut().locked = true;
-        let Err(Error::Protocol(why)) = open(&fw) else {
-            panic!("a locked board opened");
+        assert!(
+            matches!(open(&fw), Err(Error::Locked)),
+            "a locked board opened"
+        );
+    }
+
+    #[test]
+    fn a_locked_board_opens_and_saves_once_unlocked_with_no_enter() {
+        let fw = firmware();
+        fw.borrow_mut().locked = true;
+        let candidate = Candidate {
+            listing: Box::default(),
+            io: Some(Box::new(Zmk::new(Box::new(Fake(Rc::clone(&fw)))))),
+            guard: None,
         };
-        assert_eq!(why, LOCKED);
+        let mut model = crate::session::Model::start(crate::session::Attached {
+            kind: crate::session::Kind::Pick(vec![candidate]),
+        });
+        let ticks = |model: &mut crate::session::Model| {
+            for _ in 0..10 {
+                model.handle(crate::Event::Tick, 80).unwrap();
+            }
+            plain(&model.text(80, 20))
+        };
+        // One board starts opening by itself, and its card waits for the unlock key.
+        let text = ticks(&mut model);
+        assert!(text.contains("it opens by itself"), "{text}");
+        fw.borrow_mut().locked = false;
+        let text = ticks(&mut model);
+        assert!(
+            text.contains("L1") && !text.contains("opens by itself"),
+            "{text}"
+        );
+
+        // Idle, it locks itself again: `:w` waits for the key, then writes.
+        model.handle(crate::Event::Char('/'), 80).unwrap();
+        model.handle(crate::Event::Char('Z'), 80).unwrap();
+        model.handle(crate::Event::Confirm, 80).unwrap();
+        fw.borrow_mut().locked = true;
+        let text = command(&mut model, "w");
+        assert!(text.contains("to finish writing"), "{text}");
+        assert_eq!(fw.borrow().layers[0].1[0], bind(KP, key(0x04), 0));
+        fw.borrow_mut().locked = false;
+        ticks(&mut model);
+        assert_eq!(fw.borrow().layers[0].1[0], bind(KP, key(0x1D), 0));
     }
 
     #[test]

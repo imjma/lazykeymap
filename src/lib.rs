@@ -17,6 +17,9 @@ pub enum Error {
     Disconnected,
     /// This store already has a live session. Drop that session before `open`.
     Busy,
+    /// A ZMK Studio keyboard refused until its `&studio_unlock` key is pressed. The open port
+    /// keeps the unlock, so asking again after it goes through.
+    Locked,
     /// A report or a definition failed a check inside `vial`. The string is ours.
     Protocol(&'static str),
 }
@@ -36,6 +39,7 @@ impl std::fmt::Display for Error {
             }
             Error::Disconnected => write!(f, "the keyboard disconnected"),
             Error::Busy => write!(f, "that keyboard is already open"),
+            Error::Locked => write!(f, "locked: press the keyboard's Studio unlock key"),
             Error::Protocol(msg) => write!(f, "{msg}"),
         }
     }

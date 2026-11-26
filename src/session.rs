@@ -575,6 +575,23 @@ impl Model {
     pub(crate) fn start(attached: Attached) -> Self {
         let kind = match attached.kind {
             Kind::Ready(session) => ModelKind::Map(session),
+            // One board opens at once, as Enter on its card would; a locked Studio board then
+            // waits on its card for the unlock key.
+            Kind::Pick(candidates) if candidates.len() == 1 => {
+                match vial::Load::begin(&candidates[0]) {
+                    Ok(load) => ModelKind::Open {
+                        candidates,
+                        cursor: 0,
+                        load,
+                        land: 0,
+                    },
+                    Err(err) => ModelKind::Pick {
+                        candidates,
+                        cursor: 0,
+                        failed: Some((0, why_not(&err))),
+                    },
+                }
+            }
             Kind::Pick(candidates) => ModelKind::Pick {
                 candidates,
                 cursor: 0,
@@ -1756,6 +1773,23 @@ impl Model {
         if matches!(self.kind, ModelKind::Open { .. }) {
             return self.pump();
         }
+        // A Studio card waiting for its unlock key: ask again, and open the moment it is in.
+        if let ModelKind::Pick {
+            failed: Some((at, why)),
+            ..
+        } = &self.kind
+        {
+            if why == LOCKED_CARD {
+                let at = *at;
+                let ModelKind::Pick {
+                    candidates, failed, ..
+                } = mem::replace(&mut self.kind, vacant())
+                else {
+                    unreachable!("matched above");
+                };
+                return self.open_pick(candidates, at, failed);
+            }
+        }
         if matches!(
             self.kind,
             ModelKind::Lost {
@@ -2599,9 +2633,16 @@ fn clamp_col(board: &vial::Board, spot: &mut vial::Spot) {
 fn why_not(err: &Error) -> String {
     match err {
         Error::Disconnected => "no answer: wake it, then enter".to_string(),
+        Error::Locked => LOCKED_CARD.to_string(),
         other => other.to_string(),
     }
 }
+
+/// A Studio board's card while it waits for its unlock key. `tick` asks again on each tick.
+const LOCKED_CARD: &str = "🔒 press the keyboard's Studio unlock key: it opens by itself";
+
+/// The hold prompt while a save waits for a Studio board's unlock key.
+const LOCKED_SAVE: &str = "locked: press the keyboard's Studio unlock key to finish writing";
 
 fn vacant() -> ModelKind {
     ModelKind::Pick {
@@ -3304,6 +3345,8 @@ impl Session<Mapping> {
         match self.board.commit(&write) {
             Ok(vial::Commit::Stored | vial::Commit::Same) => Assign::Mapped(self),
             Ok(vial::Commit::Holding(hold)) => Assign::Holding(self.holding(write, hold.prompt)),
+            // A Studio board that locked itself while idle: wait for its unlock key, then go on.
+            Err(Error::Locked) => Assign::Holding(self.holding(write, LOCKED_SAVE.to_string())),
             Err(err) => Assign::Disconnected(err, self),
         }
     }
@@ -3341,6 +3384,8 @@ impl Session<Holding> {
             Err(err) => HoldStep::Disconnected(err, self.cancel()),
             Ok(true) => HoldStep::Waiting(self),
             Ok(false) => match self.board.commit(&self.phase.write) {
+                // The lock state can lag the key; ask again on the next tick.
+                Err(Error::Locked) => HoldStep::Waiting(self),
                 Err(err) => HoldStep::Disconnected(err, self.cancel()),
                 Ok(vial::Commit::Holding(hold)) => {
                     if !hold.prompt.is_empty() {

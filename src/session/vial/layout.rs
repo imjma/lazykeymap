@@ -1162,6 +1162,8 @@ fn pick_cards(
                     ),
                 ]
             }
+            // A card waiting for an unlock is not a failure: it says what to do, unmarked.
+            (None, Some(why)) if why.starts_with('🔒') => vec![edge, seg(*why, bg, UNLOCK, true)],
             (None, Some(why)) => vec![edge, seg(format!("✕ {why}"), bg, UNLOCK, true)],
             (None, None) => vec![edge, seg(ids, bg, DIM, false)],
         };
@@ -1540,13 +1542,14 @@ fn cap_lines(legend: &str, room: usize) -> (String, String) {
     if let Some((head, tail)) = legend.split_once('(') {
         if legend.ends_with(')') && !head.is_empty() {
             let main = tail.trim_end_matches(')').to_string();
-            if !main.is_empty() && fits(head, room) && fits(&main, room) {
-                return (head.to_string(), main);
+            // A behavior name longer than the cap is cut to it: `timerle` over `⌘ C`.
+            if !main.is_empty() && fits(&main, room) {
+                return (head.chars().take(room).collect(), main);
             }
             // `lt(Sym Space)`: the first parameter goes up beside the behavior, `lt Sym`, cut
             // to the cap when it is long, so the last parameter (the tap) stays whole.
             if let Some((first, rest)) = main.split_once(' ') {
-                if fits(head, room) && fits(rest, room) {
+                if fits(rest, room) {
                     let top: String = format!("{head} {first}").chars().take(room).collect();
                     return (top, rest.to_string());
                 }
