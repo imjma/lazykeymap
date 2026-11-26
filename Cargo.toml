@@ -1,6 +1,6 @@
 [package]
 name = "lazykeymap"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Remap a Vial or ZMK Studio keyboard from the terminal"
 license = "MIT"
