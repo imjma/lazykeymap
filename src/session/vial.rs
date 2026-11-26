@@ -9,7 +9,9 @@ mod entries;
 mod keycodes;
 pub(super) use catalog::{Found, Listed, Range};
 pub(super) use entries::{Action, Combo, Spot, Tab, TapDance, MAX_DELAY};
-pub(super) use layout::{search_across, Column, Lower, Mode, ModeTone, Popup, PopupLine};
+pub(super) use layout::{
+    basic_step, search_across, Column, Lower, Mode, ModeTone, Popup, PopupLine,
+};
 mod dts;
 mod file;
 mod layout;

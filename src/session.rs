@@ -1073,7 +1073,17 @@ impl Model {
                     }
                 } else {
                     let hits = session.list(browse).hits;
-                    grid_step(cursor, hits.len(), vial::search_across(&hits, cols), dir);
+                    // The Basic group is a keyboard: arrows go to the key beside, above, below.
+                    let keyboard = matches!(browse, Browse::Shelf(ShelfIndex(0)));
+                    match keyboard
+                        .then(|| vial::basic_step(&hits, *cursor, cols, dir))
+                        .flatten()
+                    {
+                        Some(next) => *cursor = next,
+                        None => {
+                            grid_step(cursor, hits.len(), vial::search_across(&hits, cols), dir)
+                        }
+                    }
                 }
             }
             ModelKind::Palette {
@@ -3184,6 +3194,7 @@ fn render(
                 hits: &listed.hits,
                 cursor: *cursor,
                 preview: preview.as_ref(),
+                keyboard: matches!(browse, Browse::Shelf(ShelfIndex(0))),
             };
             session.paint(target.spot(), None, Some(lower), &chrome)
         }

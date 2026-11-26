@@ -30,7 +30,7 @@ Plug in a Vial keyboard, or connect a ZMK keyboard built with Studio support by 
 |---|---|
 | `h` `j` `k` `l`, arrows | move between keys |
 | `tab`, `shift-tab` | next and previous layer, then the Tap Dance, Combos, and Macros tabs (on a keymap file: Combos, Macros, Behaviors, Conditional, and Encoders) |
-| `enter` or `/` | pick a keycode for the selected key |
+| `enter` or `/` | pick a keycode for the selected key. On Vial the Basic group is drawn as a keyboard, as in Vial: arrows move to the key beside, above, or below, and `NO`, `TRNS`, and the keys a keyboard has no room for follow under it |
 | `u` | undo the last change |
 | `:w` | write every change to the keyboard |
 | `:wq`, `:q`, `:q!`, `:e!` | write and quit, quit, quit without writing, discard changes |

@@ -770,3 +770,27 @@ fn multi_line_custom_names_stay_on_one_line() -> lazykeymap::Result<()> {
     assert!(text.lines().count() <= 16, "{text}");
     Ok(())
 }
+
+#[test]
+fn the_basic_group_is_a_keyboard_and_arrows_move_on_it() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(130, 40));
+    app.handle(lazykeymap::Event::Confirm)?;
+    let text = app.screen().text().to_string();
+    assert!(text.contains("Bksp") && text.contains("RShift"), "{text}");
+    // From `NO` under the keyboard: up is the bottom-row key above it, up again the left Shift,
+    // right along the row to Z, then up the stagger (Z sits under the gap of A and S) and back.
+    for (event, landed) in [
+        (lazykeymap::Event::Up, "→ LGui"),
+        (lazykeymap::Event::Up, "→ LShift"),
+        (lazykeymap::Event::Right, "→ Z"),
+        (lazykeymap::Event::Up, "→ S"),
+        (lazykeymap::Event::Up, "→ W"),
+        (lazykeymap::Event::Down, "→ S"),
+    ] {
+        app.handle(event)?;
+        let text = app.screen().text();
+        assert!(text.contains(landed), "{landed}: {text}");
+    }
+    Ok(())
+}

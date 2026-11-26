@@ -2,6 +2,7 @@ use crate::{Error, Result};
 use serde_json::Value;
 
 use super::catalog::Found;
+use super::Dir;
 
 /// Matrix cell or one encoder direction. Direction 0 is clockwise.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -284,6 +285,8 @@ pub(in crate::session) enum Lower<'a> {
         cursor: usize,
         /// What Enter would stage, drawn in amber on the key or cell it changes.
         preview: Option<&'a super::Preview>,
+        /// The Basic group, drawn as vial-gui draws it: an ANSI keyboard (`basic_step` moves on it).
+        keyboard: bool,
     },
     /// A one-line text or number field.
     Edit { title: &'a str, text: &'a str },
@@ -1000,6 +1003,7 @@ fn lower_body(lower: &Lower<'_>, room: usize, width: u16) -> Vec<String> {
             query,
             hits,
             cursor,
+            keyboard,
             ..
         } => {
             // The query line, as in the find list: typing searches every group.
@@ -1013,7 +1017,11 @@ fn lower_body(lower: &Lower<'_>, room: usize, width: u16) -> Vec<String> {
                 format!(" › {query}{block}")
             };
             let mut out = vec![line];
-            out.extend(search_grid(hits, *cursor, room.saturating_sub(1), width));
+            let room = room.saturating_sub(1);
+            match basic_plan(hits, width).filter(|_| *keyboard) {
+                Some(plan) => out.extend(basic_body(&plan, hits, *cursor, room, width)),
+                None => out.extend(search_grid(hits, *cursor, room, width)),
+            }
             out
         }
         Lower::Edit { text, .. } => {
@@ -1212,8 +1220,9 @@ fn search_grid(hits: &[Found], cursor: usize, room: usize, width: usize) -> Vec<
     let across = (width / cell).max(1);
     let rows = hits.len().div_ceil(across);
     let down = room.min(rows);
-    let cursor = cursor.min(hits.len() - 1);
-    let first = (cursor / across).saturating_sub(down / 2).min(rows - down);
+    // A cursor past the hits, as one on the Basic keyboard above, highlights nothing here.
+    let shown = cursor.min(hits.len() - 1);
+    let first = (shown / across).saturating_sub(down / 2).min(rows - down);
     (first..first + down)
         .map(|row| {
             (0..across)
@@ -1255,6 +1264,287 @@ fn hit_cell(hit: &Found, on: bool, legend_w: usize, token_w: usize, cell: usize)
         );
     }
     format!("{mark}{legend:<legend_w$}{}{gap}", dye(&tail, DIM, false))
+}
+
+/// vial-gui's Basic tab: an ANSI keyboard, each key `(gap, width, code, cluster)` in quarter
+/// units. Cluster 1 is the navigation block and 2 the numpad; a narrow panel drops the numpad,
+/// then the navigation block, as vial-gui's 100%, 80% and 70% pictures do.
+const ANSI: [&[(u8, u8, u16, u8)]; 6] = [
+    &[
+        (0, 4, 0x29, 0),
+        (4, 4, 0x3A, 0),
+        (0, 4, 0x3B, 0),
+        (0, 4, 0x3C, 0),
+        (0, 4, 0x3D, 0),
+        (2, 4, 0x3E, 0),
+        (0, 4, 0x3F, 0),
+        (0, 4, 0x40, 0),
+        (0, 4, 0x41, 0),
+        (2, 4, 0x42, 0),
+        (0, 4, 0x43, 0),
+        (0, 4, 0x44, 0),
+        (0, 4, 0x45, 0),
+        (1, 4, 0x46, 1),
+        (0, 4, 0x47, 1),
+        (0, 4, 0x48, 1),
+    ],
+    &[
+        (0, 4, 0x35, 0),
+        (0, 4, 0x1E, 0),
+        (0, 4, 0x1F, 0),
+        (0, 4, 0x20, 0),
+        (0, 4, 0x21, 0),
+        (0, 4, 0x22, 0),
+        (0, 4, 0x23, 0),
+        (0, 4, 0x24, 0),
+        (0, 4, 0x25, 0),
+        (0, 4, 0x26, 0),
+        (0, 4, 0x27, 0),
+        (0, 4, 0x2D, 0),
+        (0, 4, 0x2E, 0),
+        (0, 8, 0x2A, 0),
+        (1, 4, 0x49, 1),
+        (0, 4, 0x4A, 1),
+        (0, 4, 0x4B, 1),
+        (1, 4, 0x53, 2),
+        (0, 4, 0x54, 2),
+        (0, 4, 0x55, 2),
+        (0, 4, 0x56, 2),
+    ],
+    &[
+        (0, 6, 0x2B, 0),
+        (0, 4, 0x14, 0),
+        (0, 4, 0x1A, 0),
+        (0, 4, 0x08, 0),
+        (0, 4, 0x15, 0),
+        (0, 4, 0x17, 0),
+        (0, 4, 0x1C, 0),
+        (0, 4, 0x18, 0),
+        (0, 4, 0x0C, 0),
+        (0, 4, 0x12, 0),
+        (0, 4, 0x13, 0),
+        (0, 4, 0x2F, 0),
+        (0, 4, 0x30, 0),
+        (0, 6, 0x31, 0),
+        (1, 4, 0x4C, 1),
+        (0, 4, 0x4D, 1),
+        (0, 4, 0x4E, 1),
+        (1, 4, 0x5F, 2),
+        (0, 4, 0x60, 2),
+        (0, 4, 0x61, 2),
+        (0, 4, 0x57, 2),
+    ],
+    &[
+        (0, 7, 0x39, 0),
+        (0, 4, 0x04, 0),
+        (0, 4, 0x16, 0),
+        (0, 4, 0x07, 0),
+        (0, 4, 0x09, 0),
+        (0, 4, 0x0A, 0),
+        (0, 4, 0x0B, 0),
+        (0, 4, 0x0D, 0),
+        (0, 4, 0x0E, 0),
+        (0, 4, 0x0F, 0),
+        (0, 4, 0x33, 0),
+        (0, 4, 0x34, 0),
+        (0, 9, 0x28, 0),
+        (14, 4, 0x5C, 2),
+        (0, 4, 0x5D, 2),
+        (0, 4, 0x5E, 2),
+        (0, 4, 0x85, 2),
+    ],
+    &[
+        (0, 9, 0xE1, 0),
+        (0, 4, 0x1D, 0),
+        (0, 4, 0x1B, 0),
+        (0, 4, 0x06, 0),
+        (0, 4, 0x19, 0),
+        (0, 4, 0x05, 0),
+        (0, 4, 0x11, 0),
+        (0, 4, 0x10, 0),
+        (0, 4, 0x36, 0),
+        (0, 4, 0x37, 0),
+        (0, 4, 0x38, 0),
+        (0, 11, 0xE5, 0),
+        (5, 4, 0x52, 1),
+        (5, 4, 0x59, 2),
+        (0, 4, 0x5A, 2),
+        (0, 4, 0x5B, 2),
+        (0, 4, 0x67, 2),
+    ],
+    &[
+        (0, 5, 0xE0, 0),
+        (0, 5, 0xE3, 0),
+        (0, 5, 0xE2, 0),
+        (0, 25, 0x2C, 0),
+        (0, 5, 0xE6, 0),
+        (0, 5, 0xE7, 0),
+        (0, 5, 0x65, 0),
+        (0, 5, 0xE4, 0),
+        (1, 4, 0x50, 1),
+        (0, 4, 0x51, 1),
+        (0, 4, 0x4F, 1),
+        (1, 8, 0x62, 2),
+        (0, 4, 0x63, 2),
+        (0, 4, 0x58, 2),
+    ],
+];
+
+/// Screen columns per key unit in the Basic keyboard.
+const BASIC_UNIT: usize = 5;
+
+/// One key of the Basic keyboard: its row, its columns, and the hit it picks, if the board
+/// stores that keycode.
+struct BasicKey {
+    row: usize,
+    start: usize,
+    end: usize,
+    hit: Option<usize>,
+}
+
+/// Where every Basic hit goes: on the keyboard, or after it (`rest`, as `NO`, `TRNS`, F13).
+struct Basic {
+    keys: Vec<BasicKey>,
+    rest: Vec<usize>,
+}
+
+impl Basic {
+    fn row_nearest(&self, row: usize, x: usize) -> Option<usize> {
+        self.keys
+            .iter()
+            .filter(|key| key.row == row && key.hit.is_some())
+            .min_by_key(|key| ((key.start + key.end) / 2).abs_diff(x))
+            .and_then(|key| key.hit)
+    }
+}
+
+/// The widest ANSI picture that fits `width`; `None` when even the 70% one does not.
+fn basic_plan(hits: &[Found], width: usize) -> Option<Basic> {
+    let col = |q: usize| q * BASIC_UNIT / 4;
+    for most in [2u8, 1, 0] {
+        let mut keys = Vec::new();
+        let mut widest = 0;
+        for (row, line) in ANSI.iter().enumerate() {
+            let mut q = 0usize;
+            for &(gap, w, code, _) in line.iter().filter(|key| key.3 <= most) {
+                q += usize::from(gap);
+                keys.push(BasicKey {
+                    row,
+                    start: col(q),
+                    end: col(q + usize::from(w)),
+                    hit: hits.iter().position(|hit| hit.code == code),
+                });
+                q += usize::from(w);
+            }
+            widest = widest.max(col(q));
+        }
+        if widest < width {
+            let rest = (0..hits.len())
+                .filter(|index| !keys.iter().any(|key| key.hit == Some(*index)))
+                .collect();
+            return Some(Basic { keys, rest });
+        }
+    }
+    None
+}
+
+/// The Basic keyboard, a line per row, then the hits it has no key for in the usual grid.
+fn basic_body(
+    plan: &Basic,
+    hits: &[Found],
+    cursor: usize,
+    room: usize,
+    width: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in 0..ANSI.len() {
+        let mut line = String::from(" ");
+        let mut at = 0;
+        for key in plan.keys.iter().filter(|key| key.row == row) {
+            line.push_str(&" ".repeat(key.start - at));
+            let face = (key.end - key.start).saturating_sub(1);
+            let mut legend = key.hit.map_or("", |index| hits[index].legend.as_str());
+            // `Num 7` on a one-unit key reads `7`, as on a numpad.
+            if !fits(legend, face) {
+                legend = legend.rsplit(' ').next().unwrap_or(legend);
+            }
+            let text = center(legend, face);
+            line.push_str(&match key.hit {
+                Some(index) if index == cursor => paint(&text, SELECTED_BG, SELECTED_FG, true),
+                Some(_) => paint(&text, KEY_FACE, TEXT, false),
+                None => paint(&text, KEY_FACE, DIM, false),
+            });
+            line.push(' ');
+            at = key.end;
+        }
+        out.push(line);
+    }
+    if !plan.rest.is_empty() && room > out.len() + 1 {
+        out.push(String::new());
+        let rest: Vec<Found> = plan.rest.iter().map(|&index| hits[index].clone()).collect();
+        let on = plan.rest.iter().position(|&index| index == cursor);
+        out.extend(search_grid(
+            &rest,
+            on.unwrap_or(usize::MAX),
+            room - out.len(),
+            width,
+        ));
+    }
+    out
+}
+
+/// An arrow on the Basic keyboard: along a row, or to the nearest key above or below; down
+/// from the bottom row goes to the keys after it. `None` where the keyboard is not drawn.
+pub(in crate::session) fn basic_step(
+    hits: &[Found],
+    cursor: usize,
+    cols: u16,
+    dir: Dir,
+) -> Option<usize> {
+    let width = usize::from(cols).saturating_sub(2);
+    let plan = basic_plan(hits, width)?;
+    if let Some(key) = plan.keys.iter().find(|key| key.hit == Some(cursor)) {
+        let x = (key.start + key.end) / 2;
+        let same = plan
+            .keys
+            .iter()
+            .filter(|other| other.row == key.row && other.hit.is_some());
+        let next = match dir {
+            Dir::Left => same
+                .filter(|o| o.end <= key.start)
+                .max_by_key(|o| o.start)
+                .and_then(|o| o.hit),
+            Dir::Right => same
+                .filter(|o| o.start >= key.end)
+                .min_by_key(|o| o.start)
+                .and_then(|o| o.hit),
+            Dir::Up => key
+                .row
+                .checked_sub(1)
+                .and_then(|row| plan.row_nearest(row, x)),
+            Dir::Down if key.row + 1 < ANSI.len() => plan.row_nearest(key.row + 1, x),
+            Dir::Down => plan.rest.first().copied(),
+        };
+        return Some(next.unwrap_or(cursor));
+    }
+    let at = plan.rest.iter().position(|&index| index == cursor)?;
+    let rest: Vec<Found> = plan.rest.iter().map(|&index| hits[index].clone()).collect();
+    let cell = grid_cell(&rest).2;
+    let across = (width / cell).max(1);
+    let last = rest.len() - 1;
+    let to = match dir {
+        Dir::Left => at.saturating_sub(1),
+        Dir::Right => (at + 1).min(last),
+        // Up from the first row of the rest is back on the keyboard's bottom row.
+        Dir::Up if at < across => {
+            let x = (at % across) * cell + cell / 2;
+            return Some(plan.row_nearest(ANSI.len() - 1, x).unwrap_or(cursor));
+        }
+        Dir::Up => at - across,
+        Dir::Down if at / across < last / across => (at + across).min(last),
+        Dir::Down => at,
+    };
+    Some(plan.rest[to])
 }
 
 fn panel(

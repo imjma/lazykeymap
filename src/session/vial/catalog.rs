@@ -22,6 +22,7 @@ struct Entry {
     masked: bool,
 }
 
+#[derive(Clone)]
 pub(in crate::session) struct Found {
     pub(in crate::session) code: u16,
     pub(in crate::session) legend: String,
