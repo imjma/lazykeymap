@@ -887,7 +887,7 @@ const ROWS: &[Row] = &[
         key: Key::Tab,
         act: Act::Shelf(1),
         name: "tab",
-        label: "group",
+        label: "group/part",
         show: true,
     },
     Row {
@@ -895,7 +895,7 @@ const ROWS: &[Row] = &[
         key: Key::BackTab,
         act: Act::Shelf(-1),
         name: "shift-tab",
-        label: "group",
+        label: "group/part",
         show: false,
     },
     Row {

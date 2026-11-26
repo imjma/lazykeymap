@@ -338,11 +338,14 @@ struct Wrap {
     legend: String,
 }
 
-/// The search list, titled with the pending `(kc)` code when there is one.
+/// The search list, titled with the pending `(kc)` code, or a ZMK binding's parts.
 fn search_list(session: &Session<Mapping>, browse: &Browse, wrap: &Option<Wrap>) -> vial::Listed {
     let mut listed = session.list(browse);
     if let Some(wrap) = wrap {
         listed.title = format!("{} > {}", wrap.legend, listed.title);
+    }
+    if let Browse::Part { parts, .. } = browse {
+        listed.title = format!("{}  ·  {}", parts.row(), listed.title);
     }
     listed
 }
@@ -360,7 +363,48 @@ impl Query {
 
 enum Browse {
     Shelf(ShelfIndex),
-    Find { query: Query, back: ShelfIndex },
+    Find {
+        query: Query,
+        back: ShelfIndex,
+    },
+    /// A ZMK binding edited a part at a time, as Keymap Editor's chips: `query` is the parts
+    /// before the active one, then what is typed for it.
+    Part {
+        parts: Parts,
+        query: String,
+    },
+}
+
+/// A binding's words, `&mt LSHIFT A`, and which one the list is choosing. `at` may be one past
+/// the end, for a parameter the binding does not have yet.
+struct Parts {
+    words: Vec<String>,
+    at: usize,
+}
+
+impl Parts {
+    /// What the composer is given for the active part: the behavior list, or the parts before.
+    fn prefix(&self) -> String {
+        match self.at {
+            0 => "&".to_string(),
+            at => format!("{} ", self.words[..at].join(" ")),
+        }
+    }
+
+    /// `&mt  [LSHIFT]  A`, the list's title.
+    fn row(&self) -> String {
+        let mut shown: Vec<String> = self.words.clone();
+        if self.at == shown.len() {
+            shown.push(String::new());
+        }
+        shown[self.at] = format!("[{}]", shown[self.at]);
+        shown.join("  ")
+    }
+
+    /// The parts after the active one, kept when a pick leaves them fitting.
+    fn tail(&self) -> &[String] {
+        self.words.get(self.at + 1..).unwrap_or_default()
+    }
 }
 
 impl Browse {
@@ -368,6 +412,19 @@ impl Browse {
         let (mut text, back) = match self {
             Browse::Shelf(index) => (String::new(), index),
             Browse::Find { query, back } => (query.0, back),
+            // `&` starts the binding over, from its behavior and with no parts kept.
+            Browse::Part { .. } if ch == '&' => {
+                let parts = Parts {
+                    words: Vec::new(),
+                    at: 0,
+                };
+                let query = parts.prefix();
+                return Browse::Part { parts, query };
+            }
+            Browse::Part { parts, mut query } => {
+                query.push(ch);
+                return Browse::Part { parts, query };
+            }
         };
         text.push(ch);
         Browse::Find {
@@ -379,6 +436,12 @@ impl Browse {
     fn backspace(self) -> Self {
         match self {
             Browse::Shelf(index) => Browse::Shelf(index),
+            Browse::Part { parts, mut query } => {
+                if query.len() > parts.prefix().len() {
+                    query.pop();
+                }
+                Browse::Part { parts, query }
+            }
             Browse::Find { mut query, back } => {
                 query.0.pop();
                 if query.0.is_empty() {
@@ -393,6 +456,12 @@ impl Browse {
     fn shift_shelf(self, delta: i8, len: usize) -> Self {
         let ShelfIndex(index) = match self {
             Browse::Shelf(index) | Browse::Find { back: index, .. } => index,
+            Browse::Part { mut parts, .. } => {
+                let len = parts.words.len().max(1) as isize;
+                parts.at = (parts.at as isize + isize::from(delta)).rem_euclid(len) as usize;
+                let query = parts.prefix();
+                return Browse::Part { parts, query };
+            }
         };
         let next = (index as isize + isize::from(delta)).rem_euclid(len as isize) as usize;
         Browse::Shelf(ShelfIndex(next))
@@ -402,6 +471,7 @@ impl Browse {
         match self {
             Browse::Shelf(ShelfIndex(index)) => vial::Range::Shelf(*index),
             Browse::Find { query, .. } => vial::Range::Find(query.as_str()),
+            Browse::Part { query, .. } => vial::Range::Find(query),
         }
     }
 }
@@ -1165,6 +1235,11 @@ impl Model {
                 browse: Browse::Shelf(_),
                 ..
             } => return self.cancel(),
+            // The same for a part with nothing typed for it.
+            ModelKind::Search {
+                browse: Browse::Part { parts, query },
+                ..
+            } if *query == parts.prefix() => return self.cancel(),
             ModelKind::Search { browse, cursor, .. } => {
                 let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
                 *browse = old.backspace();
@@ -1195,11 +1270,11 @@ impl Model {
         } = &mut self.kind
         {
             let count = session.board.shelf_count();
-            if count > 0 {
+            if count > 0 || matches!(browse, Browse::Part { .. }) {
                 let old = mem::replace(browse, Browse::Shelf(ShelfIndex(0)));
                 *browse = old.shift_shelf(delta, count);
             }
-            *cursor = 0;
+            *cursor = current_hit(session, browse);
         }
         Ok(Step::Continue)
     }
@@ -1894,14 +1969,79 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
     }
 }
 
+/// The key list for a key or cell. On a ZMK board or keymap file it opens on the binding's
+/// last part, as Keymap Editor's parameter chip; on Vial, on the first group.
 fn searching(session: Session<Mapping>, target: Target) -> ModelKind {
+    let browse = binding_parts(&session, &target).unwrap_or(Browse::Shelf(ShelfIndex(0)));
+    let cursor = current_hit(&session, &browse);
     ModelKind::Search {
         session,
-        browse: Browse::Shelf(ShelfIndex(0)),
-        cursor: 0,
+        browse,
+        cursor,
         wrap: None,
         target,
     }
+}
+
+/// The parts of the binding under the cursor, `None` where bindings are not typed (Vial).
+/// A binding not written as `&…`, such as a `#define` call, starts at the behavior list.
+fn binding_parts(session: &Session<Mapping>, target: &Target) -> Option<Browse> {
+    let board = &session.board;
+    board.typed_complete("&")?;
+    let text = match target {
+        Target::Key => session
+            .selection
+            .and_then(|place| board.key_text(session.layer, place)),
+        Target::Cell {
+            spot:
+                spot @ vial::Spot {
+                    tab: vial::Tab::Section(kind),
+                    ..
+                },
+            insert: None,
+        } => board.section(*kind).get(spot.row).and_then(|row| {
+            match vial::section_slot(*kind, row, spot.col) {
+                vial::Slot::Column(col) => row.cells.get(col).cloned(),
+                vial::Slot::Tail(index) => row.tail.get(index).cloned(),
+                _ => None,
+            }
+        }),
+        Target::Cell { .. } => None,
+    };
+    let words: Vec<String> = text
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let words = if words.first().is_some_and(|word| word.starts_with('&')) {
+        words
+    } else {
+        Vec::new()
+    };
+    let parts = Parts {
+        at: words.len().saturating_sub(1),
+        words,
+    };
+    Some(Browse::Part {
+        query: parts.prefix(),
+        parts,
+    })
+}
+
+/// The hit for the active part's current value, so the list opens on what the key has.
+fn current_hit(session: &Session<Mapping>, browse: &Browse) -> usize {
+    let Browse::Part { parts, .. } = browse else {
+        return 0;
+    };
+    let Some(word) = parts.words.get(parts.at) else {
+        return 0;
+    };
+    session
+        .list(browse)
+        .hits
+        .iter()
+        .position(|hit| hit.legend == *word)
+        .unwrap_or(0)
 }
 
 fn back_to(session: Session<Mapping>, spot: Option<vial::Spot>) -> ModelKind {
@@ -2008,84 +2148,105 @@ impl Model {
         // A query that starts with `&` is a binding being typed, as `&kp A`. On a keymap
         // file or a Studio board, Enter takes the highlighted behavior or value; once the
         // behavior has every parameter it takes, the binding is staged.
-        if let Browse::Find { query, back } = &browse {
-            if query.as_str().starts_with('&') {
-                let typed = query.as_str().to_string();
-                let hits = session.list(&browse).hits;
-                let mut words: Vec<String> = typed.split_whitespace().map(str::to_string).collect();
-                if let Some(hit) = hits.get(cursor) {
-                    if !typed.ends_with(' ') {
-                        words.pop();
-                    }
-                    words.push(hit.legend.clone());
+        let typed = match &browse {
+            Browse::Find { query, .. } if query.as_str().starts_with('&') => {
+                Some(query.as_str().to_string())
+            }
+            Browse::Part { query, .. } => Some(query.clone()),
+            _ => None,
+        };
+        if let Some(typed) = typed {
+            let hits = session.list(&browse).hits;
+            let mut words: Vec<String> = typed.split_whitespace().map(str::to_string).collect();
+            if let Some(hit) = hits.get(cursor) {
+                if !typed.ends_with(' ') {
+                    words.pop();
                 }
-                let next = words.join(" ");
-                match session.board.typed_complete(&format!("{next} ")) {
-                    None => {
-                        self.notice = Some(
-                            "typed bindings work on a ZMK keyboard or a keymap file".to_string(),
-                        );
-                    }
-                    Some(false) => {
-                        let back = ShelfIndex(back.0);
-                        self.kind = ModelKind::Search {
-                            session,
-                            browse: Browse::Find {
-                                query: Query(format!("{next} ")),
-                                back,
-                            },
-                            cursor: 0,
-                            wrap,
-                            target,
-                        };
-                        return;
-                    }
-                    Some(true) => {
-                        let code = session.board.intern(&next);
-                        match (&target, code, session.selection) {
-                            (Target::Key, Some(code), Some(place)) => {
-                                let layer = session.layer;
-                                self.land(session, vial::Write::Key { layer, place, code }, None);
-                                return;
-                            }
-                            (
-                                Target::Cell {
-                                    spot:
-                                        spot @ vial::Spot {
-                                            tab: vial::Tab::Section(kind),
-                                            ..
-                                        },
-                                    insert,
+                words.push(hit.legend.clone());
+            }
+            let mut next = words.join(" ");
+            // A part picked keeps the parts after it when the binding still takes them:
+            // `&mt LSHIFT A` with LCTRL picked is `&mt LCTRL A`.
+            if let Browse::Part { parts, .. } = &browse {
+                let whole = format!("{next} {}", parts.tail().join(" "));
+                if !parts.tail().is_empty()
+                    && session.board.typed_complete(&format!("{whole} ")) == Some(true)
+                {
+                    next = whole;
+                }
+            }
+            match session.board.typed_complete(&format!("{next} ")) {
+                None => {
+                    self.notice =
+                        Some("typed bindings work on a ZMK keyboard or a keymap file".to_string());
+                }
+                Some(false) => {
+                    let query = format!("{next} ");
+                    let browse = match browse {
+                        Browse::Find { back, .. } => Browse::Find {
+                            query: Query(query),
+                            back,
+                        },
+                        _ => {
+                            let words: Vec<String> =
+                                next.split_whitespace().map(str::to_string).collect();
+                            Browse::Part {
+                                parts: Parts {
+                                    at: words.len(),
+                                    words,
                                 },
-                                ..,
-                            ) => {
-                                let (write, after) = section_text(
-                                    &session.board,
-                                    *kind,
-                                    *spot,
-                                    insert.is_some(),
-                                    next,
-                                );
-                                self.land(session, write, Some(after));
-                                return;
+                                query,
                             }
-                            _ => {
-                                self.notice = Some(
-                                    "a typed binding goes on a key or a file's tab".to_string(),
-                                );
-                            }
+                        }
+                    };
+                    self.kind = ModelKind::Search {
+                        session,
+                        browse,
+                        cursor: 0,
+                        wrap,
+                        target,
+                    };
+                    return;
+                }
+                Some(true) => {
+                    let code = session.board.intern(&next);
+                    match (&target, code, session.selection) {
+                        (Target::Key, Some(code), Some(place)) => {
+                            let layer = session.layer;
+                            self.land(session, vial::Write::Key { layer, place, code }, None);
+                            return;
+                        }
+                        (
+                            Target::Cell {
+                                spot:
+                                    spot @ vial::Spot {
+                                        tab: vial::Tab::Section(kind),
+                                        ..
+                                    },
+                                insert,
+                            },
+                            ..,
+                        ) => {
+                            let (write, after) =
+                                section_text(&session.board, *kind, *spot, insert.is_some(), next);
+                            self.land(session, write, Some(after));
+                            return;
+                        }
+                        _ => {
+                            self.notice =
+                                Some("a typed binding goes on a key or a file's tab".to_string());
                         }
                     }
                 }
-                self.kind = ModelKind::Search {
-                    session,
-                    browse,
-                    cursor,
-                    wrap,
-                    target,
-                };
-                return;
             }
+            self.kind = ModelKind::Search {
+                session,
+                browse,
+                cursor,
+                wrap,
+                target,
+            };
+            return;
         }
         let found = session.list(&browse).hits.into_iter().nth(cursor);
         let code = match (found, &wrap) {
@@ -2818,6 +2979,7 @@ fn render(
             let listed = search_list(session, browse, wrap);
             let query = match browse {
                 Browse::Find { query, .. } => query.as_str(),
+                Browse::Part { query, .. } => query.as_str(),
                 Browse::Shelf(_) => "",
             };
             // What Enter would stage, by the same rules as `confirm_search` and `cell_write`:

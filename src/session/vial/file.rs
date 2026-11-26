@@ -1790,10 +1790,10 @@ mod tests {
         let path = copy("key");
         let mut board = load(candidates(&path).unwrap().remove(0)).unwrap();
         let place = Place::Matrix { row: 0, col: 1 };
-        // `&thm LSHIFT A` has no QMK keycode: it reads as a custom one named by its text.
+        // `&thm LSHIFT A` has no QMK keycode: it reads as its behavior over its parameters.
         assert_eq!(
             board.legend(board.code_at(0, Place::Matrix { row: 0, col: 13 }).unwrap()),
-            "thm LSHIFT A"
+            "thm(⇧ A)"
         );
         board
             .commit(&Write::Key {

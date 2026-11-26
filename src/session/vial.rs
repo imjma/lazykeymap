@@ -1208,6 +1208,11 @@ impl Board {
         self.io.binding_text(code)
     }
 
+    /// The binding on a key as text, `&mt LSHIFT A`, on a ZMK board or keymap file.
+    pub(super) fn key_text(&self, layer: u8, place: Place) -> Option<String> {
+        self.binding_text(self.code_at(layer, place)?)
+    }
+
     /// Learns the keycode of every binding in the sections, so they show as key legends.
     fn learn_codes(&mut self) {
         let texts: Vec<String> = self
@@ -2151,8 +2156,55 @@ impl Board {
         )
     }
 
+    /// A key's name on its cap, in the info lines, and in Ctrl-K. A ZMK binding reads as its
+    /// behavior over its parameters, `mo(Sym)`, `lt(Sym Space)`, `mt(⇧ A)`, and `&kp` as the key.
     pub(super) fn legend(&self, code: u16) -> String {
-        catalog::legend(&self.catalog, code)
+        match self.io.binding_text(code) {
+            Some(text) => self.binding_legend(&text),
+            None => catalog::legend(&self.catalog, code),
+        }
+    }
+
+    fn binding_legend(&self, text: &str) -> String {
+        let mut words = text.split_whitespace();
+        let label = words.next().unwrap_or_default().trim_start_matches('&');
+        let params: Vec<&str> = words.collect();
+        if label == "kp" && params.len() == 1 {
+            return self.key_legend(params[0], false);
+        }
+        if params.is_empty() {
+            return label.to_string();
+        }
+        // ZMK's own layer behaviors take the layer first; it shows by name.
+        let layer_first = matches!(label, "mo" | "to" | "tog" | "sl" | "lt");
+        let shown: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| match param.parse::<u8>() {
+                Ok(layer) if index == 0 && layer_first => self
+                    .layer_name(layer)
+                    .map_or_else(|| param.to_string(), str::to_string),
+                _ => self.key_legend(param, true),
+            })
+            .collect();
+        format!("{label}({})", shown.join(" "))
+    }
+
+    /// A key parameter as its cap legend: `Bksp`, `,`, `LShift`. Inside another behavior a bare
+    /// modifier is Keymap Editor's symbol, `mt(⇧ A)`. Anything else, as `LG(C)` or `BT_SEL`,
+    /// stays as written.
+    fn key_legend(&self, word: &str, symbols: bool) -> String {
+        let Some(value) = zmk_keys::parse(word) else {
+            return word.to_string();
+        };
+        match (value >> 16, value & 0xFFFF) {
+            (0x07, 0xE0 | 0xE4) if symbols => "⌃".to_string(),
+            (0x07, 0xE1 | 0xE5) if symbols => "⇧".to_string(),
+            (0x07, 0xE2 | 0xE6) if symbols => "⌥".to_string(),
+            (0x07, 0xE3 | 0xE7) if symbols => "⌘".to_string(),
+            (0x07, id @ (0x04..=0xA4 | 0xE0..=0xE7)) => catalog::legend(&self.catalog, id as u16),
+            _ => word.to_string(),
+        }
     }
 
     /// What Ctrl-K finds on the board, as `(where, label, more words it matches)`: every key on
@@ -2385,7 +2437,7 @@ impl Board {
                 let legend = if !key.labels[1].is_empty() {
                     key.labels[1].clone()
                 } else if place.is_some() {
-                    catalog::legend(&self.catalog, code.unwrap_or(0))
+                    self.legend(code.unwrap_or(0))
                 } else if !key.labels[0].is_empty() {
                     key.labels[0].clone()
                 } else {
@@ -2409,7 +2461,7 @@ impl Board {
                     _ => None,
                 };
                 let (legend, was) = match preview {
-                    Some(code) => (catalog::legend(&self.catalog, code), Some(legend)),
+                    Some(code) => (self.legend(code), Some(legend)),
                     None => (legend, None),
                 };
                 caps.push(Cap {
@@ -2449,11 +2501,15 @@ impl Board {
         let code = self.code_at(layer, place).unwrap_or(0);
         let saved = self.saved_code_at(layer, place).unwrap_or(0);
         let legend = self.legend(code);
+        // A ZMK binding is its text; its keycode is lazykeymap's own and means nothing to read.
+        let text = self.binding_text(code);
         layout::Detail {
-            token: catalog::token(&self.catalog, code)
-                .filter(|token| !token.eq_ignore_ascii_case(&legend)),
+            token: text.clone().or_else(|| {
+                catalog::token(&self.catalog, code)
+                    .filter(|token| !token.eq_ignore_ascii_case(&legend))
+            }),
             legend,
-            code,
+            code: text.is_none().then_some(code),
             kind: catalog::kind(code),
             layers: (0..self.layer_count())
                 .map(|other| {

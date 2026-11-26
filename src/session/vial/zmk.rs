@@ -594,6 +594,10 @@ impl Io for Zmk {
         Some((code, name))
     }
 
+    fn binding_text(&self, code: u16) -> Option<String> {
+        self.text(self.binding(code)?)
+    }
+
     fn complete(&self, typed: &str) -> Option<super::file::Completion> {
         if self.behaviors.is_empty() {
             return None;
@@ -1200,6 +1204,60 @@ impl Zmk {
             param1: chosen[0],
             param2: chosen[1],
         })
+    }
+
+    /// A binding as a keymap writes it, in the tokens `parse_binding` reads back:
+    /// `&mt LSHIFT A`, `&bt BT_SEL 1`, `&mo 2`, `&mmv MOVE_X(-2500)`.
+    fn text(&self, binding: Binding) -> Option<String> {
+        let (_, label) = self
+            .behavior_tokens()
+            .into_iter()
+            .find(|(id, _)| *id == binding.behavior)?;
+        let behavior = self.behaviors.iter().find(|b| b.id == binding.behavior)?;
+        let mut words = vec![format!("&{label}")];
+        if behavior.sets.is_empty() {
+            // Trailing zeros are left out; a zero before a set parameter keeps its place.
+            let count = if binding.param2 != 0 {
+                2
+            } else {
+                usize::from(binding.param1 != 0)
+            };
+            for &param in &[binding.param1, binding.param2][..count] {
+                let moved = move_text(param);
+                let mouse = behavior.name.starts_with("mouse_") && param != 0;
+                words.push(if mouse && bare_param(&moved) == Some(param) {
+                    moved
+                } else {
+                    param.to_string()
+                });
+            }
+            return Some(words.join(" "));
+        }
+        let mut sets: Vec<&[Vec<Param>; 2]> = behavior.sets.iter().collect();
+        let mut filled = Vec::new();
+        while let Some(slot) = next_slot(&sets, &filled) {
+            let value = [binding.param1, binding.param2][slot];
+            let (what, items) = slot_options(&sets, &label, slot, &self.layers);
+            // A key by its shortest ZMK name, `LGUI`; anything else by the token it is typed as.
+            let key = (what == "key")
+                .then(|| super::zmk_keys::name(value))
+                .flatten();
+            let word = key
+                .or_else(|| {
+                    items
+                        .iter()
+                        .find(|(token, _)| {
+                            option_value(&sets, &label, slot, token, &self.layers) == Some(value)
+                        })
+                        .map(|(token, _)| token.clone())
+                })
+                .or_else(|| super::zmk_keys::name(value))
+                .unwrap_or_else(|| value.to_string());
+            words.push(word);
+            sets.retain(|set| accepts(&set[slot], value));
+            filled.push(slot);
+        }
+        Some(words.join(" "))
     }
 
     fn behavior_tokens(&self) -> Vec<(i32, String)> {
@@ -2207,8 +2265,11 @@ mod tests {
             (0..4).map(|c| at(&board, 1, c)).collect::<Vec<_>>(),
             [0x0001, CUSTOM + 1, 0x0307, 0x00A9]
         );
-        assert_eq!(board.legend(CUSTOM), "homerow_mods LGui C");
-        assert_eq!(board.legend(CUSTOM + 1), "Bluetooth Select Profile 1");
+        // Each reads as its ZMK binding: the behavior over its parameters.
+        assert_eq!(board.legend(CUSTOM), "homerow_mods(⌘ C)");
+        assert_eq!(board.binding_text(CUSTOM).unwrap(), "&homerow_mods LGUI C");
+        assert_eq!(board.legend(CUSTOM + 1), "bt(BT_SEL 1)");
+        assert_eq!(board.legend(0x5221), "mo(1)");
     }
 
     #[test]
@@ -2280,7 +2341,7 @@ mod tests {
         let listed = board.list(Range::Find("&bt BT_SEL "));
         assert!(listed.hits.iter().any(|hit| hit.legend == "1"));
         let code = board.intern("&bt BT_SEL 1").unwrap();
-        assert_eq!(board.legend(code), "Bluetooth Select Profile 1");
+        assert_eq!(board.binding_text(code).unwrap(), "&bt BT_SEL 1");
         // The same binding the board already had: BT_SEL is command 3, profile 1.
         assert_eq!(
             board.code_at(1, Place::Matrix { row: 0, col: 1 }),

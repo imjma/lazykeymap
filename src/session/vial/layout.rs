@@ -480,7 +480,8 @@ pub(super) struct Detail {
     pub(super) legend: String,
     /// The QMK name, when the catalog lists this exact code.
     pub(super) token: Option<String>,
-    pub(super) code: u16,
+    /// The QMK keycode, and what it does; `None` on a ZMK binding, which `token` spells out.
+    pub(super) code: Option<u16>,
     pub(super) kind: String,
     /// This key on every layer: `(legend, is this layer, staged and unsaved)`.
     pub(super) layers: Vec<(String, bool, bool)>,
@@ -540,11 +541,15 @@ fn detail_lines(detail: &Detail, width: usize) -> Vec<String> {
     head.push_str("  ");
     if let Some(token) = &detail.token {
         head.push_str(&dye(token, TEXT, false));
-        head.push_str(&dye("  ·  ", DIM, false));
     }
-    head.push_str(&dye(&format!("0x{:04X}", detail.code), DIM, false));
-    head.push_str(&dye("  ·  ", DIM, false));
-    head.push_str(&dye(&detail.kind, DIM, false));
+    if let Some(code) = detail.code {
+        if detail.token.is_some() {
+            head.push_str(&dye("  ·  ", DIM, false));
+        }
+        head.push_str(&dye(&format!("0x{code:04X}"), DIM, false));
+        head.push_str(&dye("  ·  ", DIM, false));
+        head.push_str(&dye(&detail.kind, DIM, false));
+    }
     lines.push(head);
     if detail.layers.len() > 1 {
         let mut row = dye("on each layer  ", DIM, false);
@@ -1453,6 +1458,14 @@ fn cap_lines(legend: &str, room: usize) -> (String, String) {
             let main = tail.trim_end_matches(')').to_string();
             if !main.is_empty() && fits(head, room) && fits(&main, room) {
                 return (head.to_string(), main);
+            }
+            // `lt(Sym Space)`: the first parameter goes up beside the behavior, `lt Sym`, cut
+            // to the cap when it is long, so the last parameter (the tap) stays whole.
+            if let Some((first, rest)) = main.split_once(' ') {
+                if fits(head, room) && fits(rest, room) {
+                    let top: String = format!("{head} {first}").chars().take(room).collect();
+                    return (top, rest.to_string());
+                }
             }
         }
     }

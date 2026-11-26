@@ -79,6 +79,37 @@ fn a_keymap_file_is_edited_in_place() {
 }
 
 #[test]
+fn one_part_of_a_binding_is_changed_and_the_rest_kept() {
+    let dir = std::env::temp_dir().join(format!("lazykeymap-part-{}", std::process::id()));
+    let config = dir.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    let path = config.join("corne.keymap");
+    std::fs::write(&path, KEYMAP).unwrap();
+    let mut app = App::new(
+        lazykeymap::attach_file(&dir).unwrap(),
+        TestScreen::new(130, 34),
+    );
+    // `&thm LSHIFT A`: the list opens on its tap key, as Keymap Editor's parameter chip.
+    typed(&mut app, "jl");
+    app.handle(Event::Confirm).unwrap();
+    let text = plain(app.screen().text());
+    assert!(text.contains("&thm  LSHIFT  [A]"), "{text}");
+    // Back to the hold modifier; LCTRL replaces it and the tap key stays.
+    app.handle(Event::BackTab).unwrap();
+    assert!(plain(app.screen().text()).contains("&thm  [LSHIFT]  A"));
+    typed(&mut app, "LCTRL");
+    app.handle(Event::Confirm).unwrap();
+    typed(&mut app, ":w");
+    app.handle(Event::Confirm).unwrap();
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains("&thm CAPS ESC  &thm LCTRL A   &thm LCTRL S"),
+        "{written}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_config_with_two_keymaps_asks_which() {
     let dir = std::env::temp_dir().join(format!("lazykeymap-two-{}", std::process::id()));
     let config = dir.join("config");
