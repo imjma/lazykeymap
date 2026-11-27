@@ -2901,6 +2901,162 @@ fn pair_u8(text: &str) -> Option<(u8, u8)> {
     Some((left.trim().parse().ok()?, right.trim().parse().ok()?))
 }
 
+/// One key of one layer for the exported image: where it sits, unrotated in its cluster, and
+/// what it shows.
+pub(super) struct Drawn<'a> {
+    pub(super) key: &'a RawKey,
+    pub(super) legend: String,
+    pub(super) tone: Tone,
+}
+
+/// Pixels per key unit in the image.
+const SVG_UNIT: f64 = 60.0;
+const SVG_PAD: f64 = 24.0;
+/// Room above each layer for its name.
+const SVG_TITLE: f64 = 34.0;
+
+/// Every layer, one under another, as one SVG: each key at its place and angle, a rounded cap in
+/// the color of what it does, as on the board. `layers` is `(name, keys)`.
+pub(super) fn svg(board: &str, layers: &[(String, Vec<Drawn<'_>>)], light: bool) -> String {
+    let (page, ink, dim) = if light {
+        (Rgb(250, 250, 252), Rgb(36, 40, 52), Rgb(120, 126, 140))
+    } else {
+        (Rgb(26, 27, 38), TEXT, DIM)
+    };
+    // The bounds of every key's corners, after rotation, so tilted thumb keys fit.
+    let (mut left, mut top, mut right, mut bottom) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for drawn in layers.iter().flat_map(|(_, keys)| keys) {
+        let key = drawn.key;
+        for (x, y) in [
+            (key.x, key.y),
+            (key.x + key.w, key.y),
+            (key.x, key.y + key.h),
+            (key.x + key.w, key.y + key.h),
+        ] {
+            let (x, y) = world_point(key, x, y);
+            (left, top) = (left.min(x), top.min(y));
+            (right, bottom) = (right.max(x), bottom.max(y));
+        }
+    }
+    if left > right {
+        (left, top, right, bottom) = (0.0, 0.0, 1.0, 1.0);
+    }
+    let block = (bottom - top) * SVG_UNIT + SVG_TITLE + SVG_PAD;
+    let width = (right - left) * SVG_UNIT + SVG_PAD * 2.0;
+    let height = SVG_PAD * 2.0 + SVG_TITLE + block * layers.len() as f64;
+    let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width:.0}\" height=\"{height:.0}\" \
+         viewBox=\"0 0 {width:.0} {height:.0}\" font-family=\"ui-monospace, Menlo, monospace\">\n\
+         <rect width=\"100%\" height=\"100%\" fill=\"{}\"/>\n\
+         <text x=\"{SVG_PAD}\" y=\"{:.0}\" font-size=\"20\" font-weight=\"bold\" fill=\"{}\">{}</text>\n",
+        hex(page),
+        SVG_PAD + 20.0,
+        hex(ink),
+        xml(board),
+    );
+    for (index, (name, keys)) in layers.iter().enumerate() {
+        let y0 = SVG_PAD + SVG_TITLE + block * index as f64;
+        out.push_str(&format!(
+            "<text x=\"{SVG_PAD}\" y=\"{:.0}\" font-size=\"15\" fill=\"{}\">{}</text>\n",
+            y0 + 18.0,
+            hex(dim),
+            xml(name),
+        ));
+        out.push_str(&format!(
+            "<g transform=\"translate({:.1} {:.1})\">\n",
+            SVG_PAD - left * SVG_UNIT,
+            y0 + SVG_TITLE - top * SVG_UNIT,
+        ));
+        for drawn in keys {
+            out.push_str(&svg_key(drawn, light, &hex));
+        }
+        out.push_str("</g>\n");
+    }
+    out.push_str("</svg>\n");
+    out
+}
+
+fn svg_key(drawn: &Drawn<'_>, light: bool, hex: &impl Fn(Rgb) -> String) -> String {
+    let key = drawn.key;
+    let u = SVG_UNIT;
+    let (face, ink) = if light {
+        light_tone(drawn.tone)
+    } else {
+        tone_colors(drawn.tone)
+    };
+    let (x, y, w, h) = (
+        key.x * u + 2.0,
+        key.y * u + 2.0,
+        key.w * u - 4.0,
+        key.h * u - 4.0,
+    );
+    let turn = if key.rotation_angle == 0.0 {
+        String::new()
+    } else {
+        format!(
+            " transform=\"rotate({} {:.1} {:.1})\"",
+            key.rotation_angle,
+            key.rotation_x * u,
+            key.rotation_y * u
+        )
+    };
+    // A legend splits in two only when one line would not fit even at the smallest size, so
+    // `bootloader` stays whole; then each line shrinks until it fits the cap.
+    const SMALLEST: f64 = 7.5;
+    // Monospace glyphs are about 0.62 of the font size wide.
+    let room = (w - 8.0) / (SMALLEST * 0.62);
+    let (first, second) = cap_lines(&drawn.legend, room.max(1.0) as usize);
+    let lines: Vec<&str> = [first.as_str(), second.as_str()]
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .collect();
+    let size = lines
+        .iter()
+        .map(|line| (w - 8.0) / (line.chars().count() as f64 * 0.62))
+        .fold(13.0, f64::min)
+        .max(SMALLEST);
+    let mut text = String::new();
+    for (at, line) in lines.iter().enumerate() {
+        let offset = (at as f64 - (lines.len() as f64 - 1.0) / 2.0) * size * 1.2;
+        text.push_str(&format!(
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"{size:.1}\" text-anchor=\"middle\" \
+             dominant-baseline=\"central\" fill=\"{}\">{}</text>",
+            x + w / 2.0,
+            y + h / 2.0 + offset,
+            hex(ink),
+            xml(line),
+        ));
+    }
+    let stroke = if light { "#d4d7df" } else { "#3a3f52" };
+    format!(
+        "<g{turn}><rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{h:.1}\" rx=\"6\" \
+         fill=\"{}\" stroke=\"{stroke}\"/>{text}</g>\n",
+        hex(face),
+    )
+}
+
+/// The board's tones for a light page: pale faces, dark text.
+fn light_tone(tone: Tone) -> (Rgb, Rgb) {
+    let (ink, dim) = (Rgb(36, 40, 52), Rgb(140, 146, 160));
+    match tone {
+        Tone::Key => (Rgb(236, 238, 243), ink),
+        Tone::None => (Rgb(244, 244, 246), dim),
+        Tone::Trans | Tone::Decal => (Rgb(248, 249, 251), dim),
+        Tone::Layer => (Rgb(214, 230, 252), ink),
+        Tone::Hold => (Rgb(232, 222, 250), ink),
+        Tone::Media => (Rgb(216, 242, 228), ink),
+        Tone::Raw => (Rgb(252, 224, 228), ink),
+    }
+}
+
+fn xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -129,3 +129,32 @@ fn a_config_with_two_keymaps_asks_which() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn export_draws_every_layer_on_a_light_or_dark_page() {
+    let dir = std::env::temp_dir().join(format!("lazykeymap-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("corne.keymap");
+    std::fs::write(&path, KEYMAP).unwrap();
+    let mut app = App::new(
+        lazykeymap::attach_file(&path).unwrap(),
+        TestScreen::new(120, 34),
+    );
+    let light = dir.join("light.svg");
+    typed(&mut app, &format!(":export light {}", light.display()));
+    app.handle(Event::Confirm).unwrap();
+    assert!(plain(app.screen().text()).contains("saved"));
+    let svg = std::fs::read_to_string(&light).unwrap();
+    assert!(svg.starts_with("<svg") && svg.contains("#fafafc"), "{svg}");
+    for layer in ["L0  Base", "L1  Sym", "L2  Num/Nav"] {
+        assert!(svg.contains(layer), "no {layer}");
+    }
+    // A legend that is markup, as `&` on the symbol layer, is escaped.
+    assert!(svg.contains(">&amp;<") && !svg.contains(">&<"));
+    // No theme named is dark.
+    let dark = dir.join("dark.svg");
+    typed(&mut app, &format!(":export {}", dark.display()));
+    app.handle(Event::Confirm).unwrap();
+    assert!(std::fs::read_to_string(&dark).unwrap().contains("#1a1b26"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -1104,6 +1104,7 @@ impl Model {
             }
             Cmd::Layout => return self.switch_layout(session, back, arg),
             Cmd::Open => return self.open_file(session, back, arg),
+            Cmd::Export => self.notice = Some(export(&session.board, arg)),
         }
         self.kind = back_to(session, back);
         Ok(Step::Continue)
@@ -2359,6 +2360,40 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
     }
 }
 
+/// `:export [light|dark] [PATH]`: every layer as one SVG, dark unless `light` is named, at PATH
+/// or `<board>-keymap-<theme>.svg` here. The draft is drawn, unsaved changes and all.
+fn export(board: &vial::Board, arg: &str) -> String {
+    let mut words = arg.split_whitespace().peekable();
+    let light = match words.peek().copied() {
+        Some(theme @ ("light" | "dark")) => {
+            words.next();
+            theme == "light"
+        }
+        _ => false,
+    };
+    let theme = if light { "light" } else { "dark" };
+    let named = words.collect::<Vec<_>>().join(" ");
+    let path = if named.is_empty() {
+        let slug: String = board
+            .name()
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        std::path::PathBuf::from(format!("{slug}-keymap-{theme}.svg"))
+    } else {
+        match (named.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => std::path::Path::new(&home).join(rest),
+            _ => std::path::PathBuf::from(named),
+        }
+    };
+    match std::fs::write(&path, board.svg(light)) {
+        Ok(()) => format!("saved {} ({theme})", path.display()),
+        Err(err) => format!("could not save {}: {err}", path.display()),
+    }
+}
+
 /// The event a popup chip's key sends: `enter`, `esc`, `tab`, or one letter. `j k` and `↑↓`
 /// name more than one key, so they are labels, not buttons.
 fn chip_event(key: &str) -> Option<Event> {
@@ -3001,11 +3036,12 @@ enum Cmd {
     RowAdd,
     RowRemove,
     Open,
+    Export,
 }
 
 /// Every `:` command: its names (Tab fills in the first), and what it does.
 /// The `:` rows of the find-anything list and its `run` group both read this.
-const COMMANDS: [(Cmd, &[&str], &str); 16] = [
+const COMMANDS: [(Cmd, &[&str], &str); 17] = [
     (
         Cmd::Write,
         &["w", "write"],
@@ -3061,6 +3097,11 @@ const COMMANDS: [(Cmd, &[&str], &str); 16] = [
         Cmd::Open,
         &["e", "edit"],
         "link the keymap file this ZMK keyboard runs: :e config/corne.keymap",
+    ),
+    (
+        Cmd::Export,
+        &["export"],
+        "save every layer as one image: :export light, :export dark ~/corne.svg",
     ),
 ];
 

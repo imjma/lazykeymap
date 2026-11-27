@@ -2520,6 +2520,58 @@ impl Board {
         self.keymap.layers
     }
 
+    /// The keyboard's or file's name, as its card and the header show it.
+    pub(super) fn name(&self) -> &str {
+        &self.listing.name
+    }
+
+    /// What a key shows on `layer`, and its color: its fixed label when the layout gives one,
+    /// else what its keycode does.
+    fn face(&self, layer: u8, key: &layout::RawKey) -> (String, Tone) {
+        let place = layout::place_of(key);
+        let code = place.and_then(|place| self.code_at(layer, place));
+        let legend = if !key.labels[1].is_empty() {
+            key.labels[1].clone()
+        } else if place.is_some() {
+            self.legend(code.unwrap_or(0))
+        } else {
+            key.labels[0].clone()
+        };
+        let tone = if key.decal {
+            Tone::Decal
+        } else if place.is_some() {
+            catalog::tone(code.unwrap_or(0))
+        } else {
+            Tone::Key
+        };
+        (legend, tone)
+    }
+
+    /// Every layer as one SVG image, as the draft has it, on a light or a dark page.
+    pub(super) fn svg(&self, light: bool) -> String {
+        let layers: Vec<(String, Vec<layout::Drawn<'_>>)> = (0..self.layer_count())
+            .map(|layer| {
+                let name = match self.layer_name(layer) {
+                    Some(name) => format!("L{layer}  {name}"),
+                    None => format!("L{layer}"),
+                };
+                let keys = self
+                    .def
+                    .rows
+                    .iter()
+                    .flatten()
+                    .filter(|key| layout::visible(&self.def, self.options, key))
+                    .map(|key| {
+                        let (legend, tone) = self.face(layer, key);
+                        layout::Drawn { key, legend, tone }
+                    })
+                    .collect();
+                (name, keys)
+            })
+            .collect();
+        layout::svg(&self.listing.name, &layers, light)
+    }
+
     pub(super) fn text(&self, paint: &Paint<'_>) -> String {
         let frame = self.frame(paint);
         if let Some(spot) = paint.spot {
@@ -2545,23 +2597,7 @@ impl Board {
                     continue;
                 }
                 let place = layout::place_of(key);
-                let code = place.and_then(|place| self.code_at(paint.layer, place));
-                let legend = if !key.labels[1].is_empty() {
-                    key.labels[1].clone()
-                } else if place.is_some() {
-                    self.legend(code.unwrap_or(0))
-                } else if !key.labels[0].is_empty() {
-                    key.labels[0].clone()
-                } else {
-                    String::new()
-                };
-                let tone = if key.decal {
-                    Tone::Decal
-                } else if place.is_some() {
-                    catalog::tone(code.unwrap_or(0))
-                } else {
-                    Tone::Key
-                };
+                let (legend, tone) = self.face(paint.layer, key);
                 let (x, _) = layout::world_point(key, key.x, key.y);
                 let selected = place.is_some() && paint.selection == place;
                 // The key list's highlighted code, on the key it would change.
