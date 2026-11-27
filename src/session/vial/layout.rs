@@ -2941,9 +2941,28 @@ pub(super) fn svg(board: &str, layers: &[(String, Vec<Drawn<'_>>)], light: bool)
     if left > right {
         (left, top, right, bottom) = (0.0, 0.0, 1.0, 1.0);
     }
+    // One layer's cell; layers fill a grid row by row, with as many columns as bring the whole
+    // page closest to 3:2, so a preview that fits or crops it still shows every layer.
+    let cell_w = (right - left) * SVG_UNIT + SVG_PAD;
     let block = (bottom - top) * SVG_UNIT + SVG_TITLE + SVG_PAD;
-    let width = (right - left) * SVG_UNIT + SVG_PAD * 2.0;
-    let height = SVG_PAD * 2.0 + SVG_TITLE + block * layers.len() as f64;
+    let count = layers.len().max(1);
+    let page_of = |cols: usize| {
+        let rows = count.div_ceil(cols);
+        (
+            cell_w * cols as f64 + SVG_PAD,
+            SVG_PAD * 2.0 + SVG_TITLE + block * rows as f64,
+        )
+    };
+    let cols = (1..=count)
+        .min_by(|&a, &b| {
+            let off = |cols| {
+                let (w, h) = page_of(cols);
+                (w / h / 1.5).ln().abs()
+            };
+            off(a).total_cmp(&off(b))
+        })
+        .unwrap_or(1);
+    let (width, height) = page_of(cols);
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
     let mut out = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width:.0}\" height=\"{height:.0}\" \
@@ -2956,16 +2975,17 @@ pub(super) fn svg(board: &str, layers: &[(String, Vec<Drawn<'_>>)], light: bool)
         xml(board),
     );
     for (index, (name, keys)) in layers.iter().enumerate() {
-        let y0 = SVG_PAD + SVG_TITLE + block * index as f64;
+        let x0 = SVG_PAD + cell_w * (index % cols) as f64;
+        let y0 = SVG_PAD + SVG_TITLE + block * (index / cols) as f64;
         out.push_str(&format!(
-            "<text x=\"{SVG_PAD}\" y=\"{:.0}\" font-size=\"15\" fill=\"{}\">{}</text>\n",
+            "<text x=\"{x0:.0}\" y=\"{:.0}\" font-size=\"15\" fill=\"{}\">{}</text>\n",
             y0 + 18.0,
             hex(dim),
             xml(name),
         ));
         out.push_str(&format!(
             "<g transform=\"translate({:.1} {:.1})\">\n",
-            SVG_PAD - left * SVG_UNIT,
+            x0 - left * SVG_UNIT,
             y0 + SVG_TITLE - top * SVG_UNIT,
         ));
         for drawn in keys {

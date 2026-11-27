@@ -146,9 +146,23 @@ fn export_draws_every_layer_on_a_light_or_dark_page() {
     assert!(plain(app.screen().text()).contains("saved"));
     let svg = std::fs::read_to_string(&light).unwrap();
     assert!(svg.starts_with("<svg") && svg.contains("#fafafc"), "{svg}");
-    for layer in ["L0  Base", "L1  Sym", "L2  Num/Nav"] {
+    for layer in [
+        "L0  Base",
+        "L1  Sym",
+        "L2  Num/Nav",
+        "L3  BT/Func",
+        "L4  Mouse",
+        "L5  Colemak",
+        "L6  Numpad",
+    ] {
         assert!(svg.contains(layer), "no {layer}");
     }
+    // Layers sit in a grid, so the page is wider than tall and a preview shows every one.
+    let size = |name: &str| -> f64 {
+        let at = svg.find(&format!("{name}=\"")).unwrap() + name.len() + 2;
+        svg[at..].split('"').next().unwrap().parse().unwrap()
+    };
+    assert!(size("width") > size("height"), "{}", &svg[..200]);
     // A legend that is markup, as `&` on the symbol layer, is escaped.
     assert!(svg.contains(">&amp;<") && !svg.contains(">&<"));
     // No theme named is dark.
