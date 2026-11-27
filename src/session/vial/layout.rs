@@ -139,8 +139,8 @@ pub(in crate::session) struct Zone {
 }
 
 /// The frame without its marks, and where each marked run sits. A run whose end the clip cut
-/// off runs to the end of its line.
-pub(in crate::session) fn zones(frame: &str) -> (String, Vec<Zone>) {
+/// off runs to the end of its line. Runs of `hover` are drawn lit (`lift`).
+pub(in crate::session) fn zones(frame: &str, hover: Option<&Hit>) -> (String, Vec<Zone>) {
     let mut text = String::with_capacity(frame.len());
     let mut zones = Vec::new();
     for (row, line) in frame.split('\n').enumerate() {
@@ -148,8 +148,11 @@ pub(in crate::session) fn zones(frame: &str) -> (String, Vec<Zone>) {
             text.push('\n');
         }
         let row = row as u16;
-        let mut open: Vec<(Option<Hit>, u16)> = Vec::new();
+        let mut open: Vec<(Option<Hit>, u16, bool)> = Vec::new();
         let mut col = 0u16;
+        // The style in force, so a lit run starts from it and ends back on it.
+        let mut style = String::new();
+        let mut lit = 0usize;
         let mut chars = line.chars();
         while let Some(ch) = chars.next() {
             if ch != '\u{1b}' {
@@ -165,9 +168,23 @@ pub(in crate::session) fn zones(frame: &str) -> (String, Vec<Zone>) {
                 }
             }
             if let Some(code) = seq.strip_prefix("\u{1b}[>") {
-                open.push((Hit::parse(code.trim_end_matches('m')), col));
+                let hit = Hit::parse(code.trim_end_matches('m'));
+                let on = hit.is_some() && hit.as_ref() == hover;
+                if on {
+                    lit += 1;
+                    text.push_str(&lift(&style));
+                }
+                open.push((hit, col, on));
             } else if seq == MARK_END {
-                if let Some((Some(hit), start)) = open.pop() {
+                let Some((hit, start, on)) = open.pop() else {
+                    continue;
+                };
+                if on {
+                    lit -= 1;
+                    text.push_str("\u{1b}[0m");
+                    text.push_str(&style);
+                }
+                if let Some(hit) = hit {
                     zones.push(Zone {
                         row,
                         start,
@@ -177,9 +194,17 @@ pub(in crate::session) fn zones(frame: &str) -> (String, Vec<Zone>) {
                 }
             } else {
                 text.push_str(&seq);
+                style = if seq == "\u{1b}[0m" || seq == "\u{1b}[m" {
+                    String::new()
+                } else {
+                    seq
+                };
+                if lit > 0 {
+                    text.push_str(&lift(&style));
+                }
             }
         }
-        zones.extend(open.into_iter().filter_map(|(hit, start)| {
+        zones.extend(open.into_iter().filter_map(|(hit, start, _)| {
             Some(Zone {
                 row,
                 start,
@@ -189,6 +214,40 @@ pub(in crate::session) fn zones(frame: &str) -> (String, Vec<Zone>) {
         }));
     }
     (text, zones)
+}
+
+/// The hover look over `style`: its background a step lighter, or, with no background of its
+/// own, an underline.
+fn lift(style: &str) -> String {
+    let body = style
+        .strip_prefix("\u{1b}[")
+        .and_then(|rest| rest.strip_suffix('m'))
+        .unwrap_or("");
+    let mut parts: Vec<String> = body
+        .split(';')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut lit = false;
+    let mut i = 0;
+    while i < parts.len() {
+        let rgb = parts.get(i + 1).map(String::as_str) == Some("2") && i + 4 < parts.len();
+        match parts[i].as_str() {
+            "48" if rgb => {
+                for part in &mut parts[i + 2..=i + 4] {
+                    *part = (part.parse::<u16>().unwrap_or(0) + 28).min(255).to_string();
+                }
+                lit = true;
+                i += 5;
+            }
+            "38" if rgb => i += 5,
+            _ => i += 1,
+        }
+    }
+    if !lit {
+        parts.push("4".to_string());
+    }
+    format!("\u{1b}[{}m", parts.join(";"))
 }
 
 /// What is under `(col, row)`, innermost first: a key before the lower panel around it.

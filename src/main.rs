@@ -103,6 +103,7 @@ fn map_term(event: TermEvent) -> Option<Event> {
                 MouseEventKind::Down(MouseButton::Right) => Mouse::Back,
                 MouseEventKind::ScrollUp => Mouse::WheelUp,
                 MouseEventKind::ScrollDown => Mouse::WheelDown,
+                MouseEventKind::Moved => Mouse::Hover,
                 _ => return None,
             };
             Some(Event::Mouse {

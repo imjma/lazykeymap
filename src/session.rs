@@ -46,6 +46,8 @@ pub enum Mouse {
     Back,
     WheelUp,
     WheelDown,
+    /// The pointer moved: what is under it lights up when a click would do something there.
+    Hover,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -77,6 +79,8 @@ pub(crate) struct Model {
     notice: Option<String>,
     /// Where the last frame drew each clickable thing.
     zones: Vec<vial::Zone>,
+    /// What the pointer is over and a click would act on, drawn lit.
+    hover: Option<vial::Hit>,
 }
 
 enum ModelKind {
@@ -605,13 +609,33 @@ impl Model {
             kind,
             notice: None,
             zones: Vec::new(),
+            hover: None,
         }
     }
 
     /// `cols` is the screen width: the key grid moves Up and Down a whole row of it.
     pub(crate) fn handle(&mut self, event: Event, cols: u16) -> Result<Step> {
+        // A move only repaints the highlight: it keeps the notice, and an unlock still in
+        // progress does not take it for a key.
+        if let Event::Mouse {
+            button: Mouse::Hover,
+            col,
+            row,
+        } = event
+        {
+            self.hover = vial::hits_at(&self.zones, col, row)
+                .into_iter()
+                .find(|hit| **hit != vial::Hit::Lower)
+                .filter(|hit| self.clickable(hit))
+                .cloned();
+            return Ok(Step::Continue);
+        }
         if !matches!(event, Event::Tick) {
             self.notice = None;
+        }
+        // The keyboard takes over: the pointer's highlight goes until it moves again.
+        if !matches!(event, Event::Tick | Event::Mouse { .. }) {
+            self.hover = None;
         }
         if matches!(event, Event::Quit) {
             return self.quit();
@@ -658,13 +682,10 @@ impl Model {
 
     /// The screen, and, kept for the next click, where each clickable thing is on it.
     pub(crate) fn frame(&mut self, cols: u16, rows: u16) -> String {
-        let (text, zones) = vial::zones(&render(
-            &self.kind,
-            self.notice.as_deref(),
-            None,
-            cols,
-            rows,
-        ));
+        let (text, zones) = vial::zones(
+            &render(&self.kind, self.notice.as_deref(), None, cols, rows),
+            self.hover.as_ref(),
+        );
         self.zones = zones;
         text
     }
@@ -696,6 +717,7 @@ impl Model {
                 Some(hit) => self.click(hit, cols),
                 None => Ok(Step::Continue),
             },
+            Mouse::Hover => Ok(Step::Continue),
         }
     }
 
@@ -714,19 +736,26 @@ impl Model {
                 }
             }
             Hit::Chip(key) => {
-                let event = match key.as_str() {
-                    "enter" => Event::Confirm,
-                    "esc" => Event::Cancel,
-                    "tab" => Event::Tab,
-                    one if one.chars().count() == 1 => {
-                        Event::Char(one.chars().next().unwrap_or(' '))
-                    }
-                    _ => return Ok(Step::Continue),
-                };
-                return self.act(keys::act(view, &event), cols);
+                return match chip_event(&key) {
+                    Some(event) => self.act(keys::act(view, &event), cols),
+                    None => Ok(Step::Continue),
+                }
             }
             Hit::Tab(index) if matches!(self.kind, ModelKind::Map(_) | ModelKind::Sheet { .. }) => {
                 return self.tab_to(|_, _| index)
+            }
+            // Another key on the board while the key list is open: the list moves to it.
+            Hit::Key(place)
+                if matches!(&self.kind, ModelKind::Search { session, target: Target::Key, .. }
+                    if session.selection != Some(place)) =>
+            {
+                if let ModelKind::Search { mut session, .. } =
+                    mem::replace(&mut self.kind, vacant())
+                {
+                    session.selection = Some(place);
+                    self.kind = searching(session, Target::Key);
+                }
+                return Ok(Step::Continue);
             }
             _ => {}
         }
@@ -806,6 +835,40 @@ impl Model {
             self.confirm()
         } else {
             Ok(Step::Continue)
+        }
+    }
+
+    /// Whether `click` does something with `hit` here, so hovering it lights it.
+    fn clickable(&self, hit: &vial::Hit) -> bool {
+        use vial::Hit;
+        match hit {
+            Hit::Help => true,
+            Hit::Lower => false,
+            Hit::Hint(index) => keys::footer_act(view_of(&self.kind), *index).is_some(),
+            Hit::Chip(key) => chip_event(key).is_some(),
+            Hit::Tab(_) => matches!(self.kind, ModelKind::Map(_) | ModelKind::Sheet { .. }),
+            Hit::Key(_) => matches!(
+                self.kind,
+                ModelKind::Map(_)
+                    | ModelKind::Search {
+                        target: Target::Key,
+                        ..
+                    }
+            ),
+            Hit::Layer(_) => matches!(self.kind, ModelKind::Map(_)),
+            Hit::Cell(..) => matches!(self.kind, ModelKind::Sheet { .. }),
+            Hit::Card(_) => matches!(self.kind, ModelKind::Pick { .. }),
+            Hit::Pick(_) | Hit::Shelf(_) | Hit::Part(..) => {
+                matches!(self.kind, ModelKind::Search { .. })
+            }
+            Hit::Choice(_) => matches!(
+                self.kind,
+                ModelKind::Palette { .. }
+                    | ModelKind::Lost {
+                        reconnect: None,
+                        ..
+                    }
+            ),
         }
     }
 
@@ -2262,6 +2325,18 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
         ModelKind::Help { under, .. } => into_session(*under),
         ModelKind::Pick { .. } | ModelKind::Open { .. } => None,
     }
+}
+
+/// The event a popup chip's key sends: `enter`, `esc`, `tab`, or one letter. `j k` and `↑↓`
+/// name more than one key, so they are labels, not buttons.
+fn chip_event(key: &str) -> Option<Event> {
+    Some(match key {
+        "enter" => Event::Confirm,
+        "esc" => Event::Cancel,
+        "tab" => Event::Tab,
+        one if one.chars().count() == 1 => Event::Char(one.chars().next()?),
+        _ => return None,
+    })
 }
 
 /// The key list for a key or cell. On a ZMK board or keymap file it opens on the binding's

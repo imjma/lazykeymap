@@ -39,7 +39,7 @@ Plug in a Vial keyboard, or connect a ZMK keyboard built with Studio support by 
 | `:layer-add`, `:layer-remove`, `:layer-rename Sym`, `:layer-left`, `:layer-right` | add a layer, remove this one, name it, or move it one place (ZMK Studio and keymap files) |
 | `:layout`, `:layout 1` | list a ZMK board's physical layouts, or switch to one; the keyboard is read again |
 
-The mouse works too. Click a key, a tab, a cell, a board, or a hint in the bottom bar to select it; click what is already selected to do what Enter does there (open the key list, edit the cell, open the board). In the key list one click shows the keycode on the key in amber and a second click stages it, so a stray click changes nothing. The wheel changes layer over the board and scrolls a list under it; right-click is `esc`. Hold Shift (Option in some macOS terminals) to select text as usual.
+The mouse works too. What a click would act on lights up under the pointer. Click a key, a tab, a cell, a board, or a hint in the bottom bar to select it; click what is already selected to do what Enter does there (open the key list, edit the cell, open the board). In the key list one click shows the keycode on the key in amber and a second click stages it, so a stray click changes nothing; clicking another key on the board moves the list to that key. The wheel changes layer over the board and scrolls a list under it; right-click is `esc`. Hold Shift (Option in some macOS terminals) to select text as usual.
 
 Changes stay in a draft, shown in green, until `:w`. Quitting with unsaved changes asks first. A locked keyboard asks you to hold its unlock keys only when a change needs it: the bootloader key, or macros.
 

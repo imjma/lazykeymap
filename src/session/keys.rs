@@ -1285,7 +1285,10 @@ pub(super) fn cheatsheet(current: View) -> Vec<PopupLine> {
             lines.push(PopupLine::Blank);
             lines.push(PopupLine::Heading("mouse".to_string()));
             for (what, does) in [
-                ("click", "select a key, cell, tab, or hint"),
+                (
+                    "click",
+                    "select a key, cell, tab, or hint; in the key list, another key",
+                ),
                 ("click again", "open the key list, or stage the pick"),
                 ("wheel", "change layer on the board, scroll a list"),
                 ("right-click", "back, as esc"),

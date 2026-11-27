@@ -3372,6 +3372,7 @@ mod tests {
             },
             notice: None,
             zones: Vec::new(),
+            hover: None,
         };
         let text = plain(&model.frame(60, 12));
         assert!(text.contains("opening…"), "{text}");

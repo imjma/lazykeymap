@@ -819,6 +819,16 @@ fn mouse_at(
     needle: &str,
     button: lazykeymap::Mouse,
 ) -> lazykeymap::Result<()> {
+    mouse_at_nth(app, needle, 0, button)
+}
+
+/// Presses `button` on the `nth` place, in reading order, that the screen shows `needle`.
+fn mouse_at_nth(
+    app: &mut lazykeymap::App<lazykeymap::TestScreen>,
+    needle: &str,
+    nth: usize,
+    button: lazykeymap::Mouse,
+) -> lazykeymap::Result<()> {
     let mut plain = String::new();
     let mut chars = app.screen().text().chars();
     while let Some(ch) = chars.next() {
@@ -828,17 +838,59 @@ fn mouse_at(
             plain.push(ch);
         }
     }
-    let (row, line) = plain
+    let (row, col) = plain
         .lines()
         .enumerate()
-        .find(|(_, line)| line.contains(needle))
-        .unwrap_or_else(|| panic!("no {needle:?} in\n{plain}"));
-    let col = line[..line.find(needle).unwrap_or(0)].chars().count();
+        .flat_map(|(row, line)| {
+            line.match_indices(needle)
+                .map(move |(at, _)| (row, line[..at].chars().count()))
+        })
+        .nth(nth)
+        .unwrap_or_else(|| panic!("no {needle:?} #{nth} in\n{plain}"));
     app.handle(lazykeymap::Event::Mouse {
         button,
         col: col as u16,
         row: row as u16,
     })?;
+    Ok(())
+}
+
+#[test]
+fn hovering_lights_what_a_click_would_act_on() -> lazykeymap::Result<()> {
+    use lazykeymap::Mouse::Hover;
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/mini.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(100, 30));
+    let plain = app.screen().text().to_string();
+    mouse_at(&mut app, "/  find", Hover)?;
+    let lit = app.screen().text().to_string();
+    assert_ne!(lit, plain);
+    // Off it, over nothing a click acts on, the screen is as before.
+    mouse_at(&mut app, "layer 0/1", Hover)?;
+    assert_eq!(app.screen().text(), plain);
+    // A key press drops the highlight until the pointer moves again.
+    mouse_at(&mut app, "/  find", Hover)?;
+    app.handle(lazykeymap::Event::Char('l'))?;
+    assert_eq!(app.screen().text(), plain);
+    Ok(())
+}
+
+#[test]
+fn a_board_key_clicked_while_the_list_is_open_becomes_the_target() -> lazykeymap::Result<()> {
+    let board = lazykeymap::MemoryBoard::from_definition(include_str!("fixtures/corne.json"))?;
+    let mut app = lazykeymap::App::new(board.open()?, lazykeymap::TestScreen::new(130, 40));
+    app.handle(lazykeymap::Event::Confirm)?;
+    let text = app.screen().text().to_string();
+    assert!(
+        text.contains("SEARCH") && text.contains("key 0,0"),
+        "{text}"
+    );
+    // The second key on the board, not the one the list was opened on.
+    mouse_at_nth(&mut app, "NO", 1, lazykeymap::Mouse::Click)?;
+    let text = app.screen().text();
+    assert!(
+        text.contains("SEARCH") && !text.contains("key 0,0"),
+        "{text}"
+    );
     Ok(())
 }
 
