@@ -39,7 +39,7 @@ Plug in a Vial keyboard, or connect a ZMK keyboard built with Studio support by 
 | `:layer-add`, `:layer-remove`, `:layer-rename Sym`, `:layer-left`, `:layer-right` | add a layer, remove this one, name it, or move it one place (ZMK Studio and keymap files) |
 | `:layout`, `:layout 1` | list a ZMK board's physical layouts, or switch to one; the keyboard is read again |
 | `:e config/corne.keymap` | on a ZMK Studio keyboard: link the keymap file (or zmk-config folder) it runs, so `:w` writes both; the board is read again from the file |
-| `:export`, `:export light`, `:export dark ~/corne.svg` | save every layer as one SVG image, dark or light, at the path or as `<board>-keymap-<theme>.svg` in the current folder; unsaved changes are drawn as staged |
+| `:export`, `:export light`, `:export dark ~/corne.svg` | tick the layers to draw (all start ticked; `space` or a click ticks one, `a` all or none), then `enter` saves them as one SVG image, dark or light, at the path or as `<board>-keymap-<theme>.svg` in the current folder; unsaved changes are drawn as staged |
 
 The mouse works too. What a click would act on lights up under the pointer. Click a key, a tab, a cell, a board, or a hint in the bottom bar to select it; click what is already selected to do what Enter does there (open the key list, edit the cell, open the board). In the key list one click shows the keycode on the key in amber and a second click stages it, so a stray click changes nothing; clicking another key on the board moves the list to that key. The wheel changes layer over the board and scrolls a list under it; right-click is `esc`. Hold Shift (Option in some macOS terminals) to select text as usual.
 

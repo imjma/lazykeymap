@@ -163,6 +163,16 @@ enum ModelKind {
         /// The row ↑↓ chose. Typing clears it; `palette_pick` says which row Enter runs.
         cursor: Option<usize>,
     },
+    /// `:export`: which layers go in the image, ticked in a list; all start ticked.
+    Export {
+        session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        chosen: Vec<bool>,
+        cursor: usize,
+        light: bool,
+        /// Where it goes, as typed after the theme; empty for the default name.
+        path: String,
+    },
     Help {
         under: Box<ModelKind>,
         scroll: usize,
@@ -831,6 +841,14 @@ impl Model {
                 *cursor = Some(row);
                 pick == Some(row)
             }
+            // A layer row is a checkbox: a click ticks or unticks it, and Enter saves.
+            (ModelKind::Export { chosen, cursor, .. }, Hit::Choice(index)) => {
+                if let Some(on) = chosen.get_mut(index) {
+                    *on = !*on;
+                    *cursor = index;
+                }
+                false
+            }
             _ => false,
         };
         if again {
@@ -866,6 +884,7 @@ impl Model {
             Hit::Choice(_) => matches!(
                 self.kind,
                 ModelKind::Palette { .. }
+                    | ModelKind::Export { .. }
                     | ModelKind::Lost {
                         reconnect: None,
                         ..
@@ -1104,7 +1123,19 @@ impl Model {
             }
             Cmd::Layout => return self.switch_layout(session, back, arg),
             Cmd::Open => return self.open_file(session, back, arg),
-            Cmd::Export => self.notice = Some(export(&session.board, arg)),
+            Cmd::Export => {
+                let (light, path) = export_args(arg);
+                let chosen = vec![true; usize::from(session.board.layer_count())];
+                self.kind = ModelKind::Export {
+                    session,
+                    back,
+                    chosen,
+                    cursor: 0,
+                    light,
+                    path,
+                };
+                return Ok(Step::Continue);
+            }
         }
         self.kind = back_to(session, back);
         Ok(Step::Continue)
@@ -1361,6 +1392,7 @@ impl Model {
                     }
                 };
             }
+            ModelKind::Export { chosen, cursor, .. } => move_cursor(cursor, chosen.len(), dir),
             ModelKind::Edit { .. }
             | ModelKind::Hold { .. }
             | ModelKind::Release { .. }
@@ -1475,6 +1507,19 @@ impl Model {
                     *cursor = None;
                 }
             }
+            // Space ticks the layer under the cursor; `a` ticks every layer, or none when all are.
+            ModelKind::Export { chosen, cursor, .. } => match ch {
+                ' ' => {
+                    if let Some(on) = chosen.get_mut(*cursor) {
+                        *on = !*on;
+                    }
+                }
+                'a' => {
+                    let all = chosen.iter().all(|on| *on);
+                    chosen.fill(!all);
+                }
+                _ => {}
+            },
             _ => {}
         }
         Ok(Step::Continue)
@@ -1518,7 +1563,8 @@ impl Model {
             | ModelKind::Hold { .. }
             | ModelKind::Release { .. }
             | ModelKind::Ask { .. }
-            | ModelKind::Palette { .. } => {}
+            | ModelKind::Palette { .. }
+            | ModelKind::Export { .. } => {}
         }
         Ok(Step::Continue)
     }
@@ -1557,7 +1603,8 @@ impl Model {
             | ModelKind::Hold { .. }
             | ModelKind::Release { .. }
             | ModelKind::Ask { .. }
-            | ModelKind::Palette { .. } => {}
+            | ModelKind::Palette { .. }
+            | ModelKind::Export { .. } => {}
         }
         Ok(Step::Continue)
     }
@@ -1712,6 +1759,33 @@ impl Model {
                 back,
                 question,
             } => return self.answer(session, back, question, 'y'),
+            ModelKind::Export {
+                session,
+                back,
+                chosen,
+                cursor,
+                light,
+                path,
+            } => {
+                let layers: Vec<u8> = (0..chosen.len())
+                    .filter(|&at| chosen[at])
+                    .map(|at| at as u8)
+                    .collect();
+                if layers.is_empty() {
+                    self.notice = Some("tick a layer: space ticks one, a ticks all".to_string());
+                    self.kind = ModelKind::Export {
+                        session,
+                        back,
+                        chosen,
+                        cursor,
+                        light,
+                        path,
+                    };
+                } else {
+                    self.notice = Some(export(&session.board, light, &path, &layers));
+                    self.kind = back_to(session, back);
+                }
+            }
             other => self.kind = other,
         }
         Ok(Step::Continue)
@@ -1999,7 +2073,9 @@ impl Model {
                 back,
                 question,
             } => return self.answer(session, back, question, 'n'),
-            ModelKind::Palette { session, back, .. } => self.kind = back_to(session, back),
+            ModelKind::Palette { session, back, .. } | ModelKind::Export { session, back, .. } => {
+                self.kind = back_to(session, back)
+            }
             ModelKind::Help { under, .. } => self.kind = *under,
             other => self.kind = other,
         }
@@ -2333,7 +2409,8 @@ fn reading_board(kind: &mut ModelKind) -> Option<&mut vial::Board> {
         | ModelKind::Search { session, .. }
         | ModelKind::Edit { session, .. }
         | ModelKind::Ask { session, .. }
-        | ModelKind::Palette { session, .. } => Some(&mut session.board),
+        | ModelKind::Palette { session, .. }
+        | ModelKind::Export { session, .. } => Some(&mut session.board),
         ModelKind::Help { under, .. } => reading_board(under),
         _ => None,
     }
@@ -2354,15 +2431,15 @@ fn into_session(kind: ModelKind) -> Option<(Session<Mapping>, Option<vial::Spot>
         ModelKind::Release { session, back, .. }
         | ModelKind::Ask { session, back, .. }
         | ModelKind::Palette { session, back, .. }
+        | ModelKind::Export { session, back, .. }
         | ModelKind::Lost { session, back, .. } => Some((session, back)),
         ModelKind::Help { under, .. } => into_session(*under),
         ModelKind::Pick { .. } | ModelKind::Open { .. } => None,
     }
 }
 
-/// `:export [light|dark] [PATH]`: every layer as one SVG, dark unless `light` is named, at PATH
-/// or `<board>-keymap-<theme>.svg` here. The draft is drawn, unsaved changes and all.
-fn export(board: &vial::Board, arg: &str) -> String {
+/// What follows `:export`: dark unless `light` is named first, then the path, empty when none.
+fn export_args(arg: &str) -> (bool, String) {
     let mut words = arg.split_whitespace().peekable();
     let light = match words.peek().copied() {
         Some(theme @ ("light" | "dark")) => {
@@ -2371,9 +2448,14 @@ fn export(board: &vial::Board, arg: &str) -> String {
         }
         _ => false,
     };
+    (light, words.collect::<Vec<_>>().join(" "))
+}
+
+/// `layers` as one SVG at `path`, or `<board>-keymap-<theme>.svg` here when it is empty. The
+/// draft is drawn, unsaved changes and all. Says where it went, or why not.
+fn export(board: &vial::Board, light: bool, path: &str, layers: &[u8]) -> String {
     let theme = if light { "light" } else { "dark" };
-    let named = words.collect::<Vec<_>>().join(" ");
-    let path = if named.is_empty() {
+    let path = if path.is_empty() {
         let slug: String = board
             .name()
             .to_lowercase()
@@ -2383,13 +2465,15 @@ fn export(board: &vial::Board, arg: &str) -> String {
             .join("-");
         std::path::PathBuf::from(format!("{slug}-keymap-{theme}.svg"))
     } else {
-        match (named.strip_prefix("~/"), std::env::var_os("HOME")) {
+        match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
             (Some(rest), Some(home)) => std::path::Path::new(&home).join(rest),
-            _ => std::path::PathBuf::from(named),
+            _ => std::path::PathBuf::from(path),
         }
     };
-    match std::fs::write(&path, board.svg(light)) {
-        Ok(()) => format!("saved {} ({theme})", path.display()),
+    let count = layers.len();
+    let plural = if count == 1 { "" } else { "s" };
+    match std::fs::write(&path, board.svg(light, layers)) {
+        Ok(()) => format!("saved {} ({count} layer{plural}, {theme})", path.display()),
         Err(err) => format!("could not save {}: {err}", path.display()),
     }
 }
@@ -2401,6 +2485,7 @@ fn chip_event(key: &str) -> Option<Event> {
         "enter" => Event::Confirm,
         "esc" => Event::Cancel,
         "tab" => Event::Tab,
+        "space" => Event::Char(' '),
         one if one.chars().count() == 1 => Event::Char(one.chars().next()?),
         _ => return None,
     })
@@ -2999,6 +3084,7 @@ fn view_of(kind: &ModelKind) -> keys::View {
         ModelKind::Edit { .. } => keys::View::Edit,
         ModelKind::Hold { .. } | ModelKind::Release { .. } => keys::View::Hold,
         ModelKind::Ask { .. } => keys::View::Ask,
+        ModelKind::Export { .. } => keys::View::Export,
         ModelKind::Palette { .. } => keys::View::Palette,
         ModelKind::Help { .. } => keys::View::Help,
     }
@@ -3101,7 +3187,7 @@ const COMMANDS: [(Cmd, &[&str], &str); 17] = [
     (
         Cmd::Export,
         &["export"],
-        "save every layer as one image: :export light, :export dark ~/corne.svg",
+        "tick layers and save them as one image: :export light, :export dark ~/corne.svg",
     ),
 ];
 
@@ -3343,6 +3429,7 @@ fn mode_of(kind: &ModelKind) -> vial::Mode {
         ModelKind::Palette { text, .. } if text.starts_with(':') => ("COMMAND", Input),
         ModelKind::Palette { .. } => ("FIND", Input),
         ModelKind::Ask { .. } => ("CONFIRM", Alert),
+        ModelKind::Export { .. } => ("EXPORT", Input),
         ModelKind::Hold { .. } | ModelKind::Release { .. } => ("UNLOCK", Alert),
         ModelKind::Help { under, .. } => return mode_of(under),
     };
@@ -3568,6 +3655,51 @@ fn render(
             let rows = palette(&session.board, text);
             let pick = palette_pick(text, rows.len(), *cursor);
             let popup = palette_popup(&rows, text, pick);
+            let chrome = Chrome {
+                popup: Some(&popup),
+                ..chrome
+            };
+            session.paint(*back, None, None, &chrome)
+        }
+        ModelKind::Export {
+            session,
+            back,
+            chosen,
+            cursor,
+            light,
+            path,
+        } => {
+            let ticked = chosen.iter().filter(|on| **on).count();
+            let mut lines = vec![
+                vial::PopupLine::Text(format!(
+                    "{ticked} of {} layers to {}",
+                    chosen.len(),
+                    if path.is_empty() {
+                        "the default file"
+                    } else {
+                        path
+                    }
+                )),
+                vial::PopupLine::Blank,
+            ];
+            lines.extend(chosen.iter().enumerate().map(|(layer, on)| {
+                let name = session.board.layer_name(layer as u8).unwrap_or("");
+                let mark = if *on { "[x]" } else { "[ ]" };
+                vial::PopupLine::Choice(format!("{mark} L{layer}  {name}"), layer == *cursor)
+            }));
+            let popup = vial::Popup {
+                title: format!("export {}", if *light { "light" } else { "dark" }),
+                lines,
+                scroll: 0,
+                actions: vec![
+                    ("space", "tick"),
+                    ("a", "all"),
+                    ("enter", "save"),
+                    ("esc", "cancel"),
+                ],
+                warn: false,
+                pinned: false,
+            };
             let chrome = Chrome {
                 popup: Some(&popup),
                 ..chrome

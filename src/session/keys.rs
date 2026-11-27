@@ -20,6 +20,8 @@ pub(super) enum View {
     Lost,
     /// Ctrl-K: one list of commands, places, and keys, filtered as you type.
     Palette,
+    /// `:export`: tick the layers that go in the image.
+    Export,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -416,6 +418,71 @@ const ROWS: &[Row] = &[
         act: Act::Cancel,
         name: "esc",
         label: "no",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Char('j'),
+        act: Act::Nudge(Dir::Down),
+        name: "j",
+        label: "down",
+        // The popup draws its own key chips.
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Char('k'),
+        act: Act::Nudge(Dir::Up),
+        name: "k",
+        label: "up",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Down,
+        act: Act::Nudge(Dir::Down),
+        name: "down",
+        label: "down",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Up,
+        act: Act::Nudge(Dir::Up),
+        name: "up",
+        label: "up",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Char(' '),
+        act: Act::Type(' '),
+        name: "space",
+        label: "tick or untick the layer",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Char('a'),
+        act: Act::Type('a'),
+        name: "a",
+        label: "tick every layer, or none",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Confirm,
+        act: Act::Confirm,
+        name: "enter",
+        label: "save the ticked layers",
+        show: false,
+    },
+    Row {
+        view: View::Export,
+        key: Key::Cancel,
+        act: Act::Cancel,
+        name: "esc",
+        label: "cancel",
         show: false,
     },
     Row {
@@ -1261,6 +1328,7 @@ pub(super) fn cheatsheet(current: View) -> Vec<PopupLine> {
         View::Edit,
         View::Ask,
         View::Palette,
+        View::Export,
         View::Lost,
     ];
     let mut lines = vec![PopupLine::Text(
@@ -1314,6 +1382,7 @@ fn title(view: View) -> &'static str {
         View::Ask => "confirm",
         View::Lost => "disconnected",
         View::Palette => "find anything",
+        View::Export => "export",
     }
 }
 

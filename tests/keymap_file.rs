@@ -143,6 +143,13 @@ fn export_draws_every_layer_on_a_light_or_dark_page() {
     let light = dir.join("light.svg");
     typed(&mut app, &format!(":export light {}", light.display()));
     app.handle(Event::Confirm).unwrap();
+    // The list of layers comes up, every one ticked; Enter saves them all.
+    let text = plain(app.screen().text());
+    assert!(
+        text.contains("[x] L0  Base") && text.contains("[x] L6  Numpad"),
+        "{text}"
+    );
+    app.handle(Event::Confirm).unwrap();
     assert!(plain(app.screen().text()).contains("saved"));
     let svg = std::fs::read_to_string(&light).unwrap();
     assert!(svg.starts_with("<svg") && svg.contains("#fafafc"), "{svg}");
@@ -165,10 +172,43 @@ fn export_draws_every_layer_on_a_light_or_dark_page() {
     assert!(size("width") > size("height"), "{}", &svg[..200]);
     // A legend that is markup, as `&` on the symbol layer, is escaped.
     assert!(svg.contains(">&amp;<") && !svg.contains(">&<"));
-    // No theme named is dark.
+    // No theme named is dark. Unticking a layer leaves it out.
     let dark = dir.join("dark.svg");
     typed(&mut app, &format!(":export {}", dark.display()));
     app.handle(Event::Confirm).unwrap();
-    assert!(std::fs::read_to_string(&dark).unwrap().contains("#1a1b26"));
+    app.handle(Event::Down).unwrap();
+    app.handle(Event::Char(' ')).unwrap();
+    assert!(plain(app.screen().text()).contains("[ ] L1  Sym"));
+    app.handle(Event::Confirm).unwrap();
+    let svg = std::fs::read_to_string(&dark).unwrap();
+    assert!(svg.contains("#1a1b26") && svg.contains("L0  Base") && svg.contains("L2  Num/Nav"));
+    assert!(!svg.contains("L1  Sym"), "an unticked layer was drawn");
+    // `a` unticks all of them when all are ticked; with none, Enter says so and saves nothing.
+    let none = dir.join("none.svg");
+    typed(&mut app, &format!(":export {}", none.display()));
+    app.handle(Event::Confirm).unwrap();
+    app.handle(Event::Char('a')).unwrap();
+    app.handle(Event::Char('a')).unwrap();
+    app.handle(Event::Char('a')).unwrap();
+    app.handle(Event::Confirm).unwrap();
+    assert!(plain(app.screen().text()).contains("tick a layer"));
+    assert!(!none.exists());
+    // A click on a row ticks it.
+    let text = plain(app.screen().text());
+    let (row, line) = text
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("[ ] L3  BT/Func"))
+        .unwrap();
+    let col = line[..line.find("[ ]").unwrap()].chars().count() as u16;
+    app.handle(Event::Mouse {
+        button: lazykeymap::Mouse::Click,
+        col,
+        row: row as u16,
+    })
+    .unwrap();
+    app.handle(Event::Confirm).unwrap();
+    let svg = std::fs::read_to_string(&none).unwrap();
+    assert!(svg.contains("L3  BT/Func") && !svg.contains("L0  Base"));
     std::fs::remove_dir_all(&dir).unwrap();
 }

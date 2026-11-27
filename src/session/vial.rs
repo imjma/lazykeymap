@@ -2547,10 +2547,11 @@ impl Board {
         (legend, tone)
     }
 
-    /// Every layer as one SVG image, as the draft has it, on a light or a dark page.
-    pub(super) fn svg(&self, light: bool) -> String {
-        let layers: Vec<(String, Vec<layout::Drawn<'_>>)> = (0..self.layer_count())
-            .map(|layer| {
+    /// `layers` as one SVG image, as the draft has them, on a light or a dark page.
+    pub(super) fn svg(&self, light: bool, layers: &[u8]) -> String {
+        let layers: Vec<(String, Vec<layout::Drawn<'_>>)> = layers
+            .iter()
+            .map(|&layer| {
                 let name = match self.layer_name(layer) {
                     Some(name) => format!("L{layer}  {name}"),
                     None => format!("L{layer}"),
