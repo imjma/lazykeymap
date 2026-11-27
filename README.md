@@ -1,6 +1,6 @@
 # lazykeymap
 
-Remap a [Vial](https://get.vial.today) or [ZMK Studio](https://zmk.dev/docs/features/studio) keyboard from the terminal: the keymap on every layer, and on Vial also tap dances, combos, and macros.
+Remap a [Vial](https://get.vial.today) or [ZMK Studio](https://zmk.dev/docs/features/studio) keyboard from the terminal: the keymap on every layer, and on Vial also tap dances, combos, and macros. It also edits a ZMK `.keymap` file, writes to the file and the keyboard at once when the keyboard runs that keymap, exports layers as an image, and works with the mouse as well as the keys.
 
 ## Install
 
@@ -17,7 +17,7 @@ Homebrew 7 refuses formulae from a tap until you trust it, hence the middle line
 From source, with a Rust toolchain:
 
 ```sh
-cargo install --git https://github.com/imjma/lazykeymap
+cargo install --locked --git https://github.com/imjma/lazykeymap
 ```
 
 On Linux, the build needs `libudev` and `libdbus` (`libudev-dev` and `libdbus-1-dev` on Debian and Ubuntu) and `pkg-config`, and reading the keyboard needs a udev rule that gives your user access to its hidraw device, the same rule Vial asks for. A ZMK board's serial port needs your user in the `dialout` group (`uucp` on Arch); ZMK over Bluetooth goes through BlueZ.
@@ -30,7 +30,7 @@ From the AUR, with `yay` (Omarchy has it) or any AUR helper:
 yay -S lazykeymap
 ```
 
-It builds from source and updates with the rest of the system (`yay -Syu`). The package installs the udev rule that lets you use a Vial keyboard (replug it after the first install). A ZMK Studio keyboard over USB needs your user in the serial-port group, once; log out and back in after:
+It builds from source and updates with the rest of the system (`yay -Syu`). The package installs the udev rule that lets you use a Vial keyboard (replug it after the first install). Until the first release is published to the AUR, use the Cargo steps below. A ZMK Studio keyboard over USB needs your user in the serial-port group, once; log out and back in after:
 
 ```sh
 sudo usermod -aG uucp "$USER"
@@ -59,14 +59,14 @@ Plug in a Vial keyboard, or connect a ZMK keyboard built with Studio support by 
 | `h` `j` `k` `l`, arrows | move between keys |
 | `tab`, `shift-tab` | next and previous layer, then the Tap Dance, Combos, and Macros tabs (on a keymap file: Combos, Macros, Behaviors, Conditional, and Encoders) |
 | `enter` or `/` | pick a keycode for the selected key. On Vial the Basic group is drawn as a keyboard, as in Vial: arrows move to the key beside, above, or below, and `NO`, `TRNS`, and the keys a keyboard has no room for follow under it |
-| `u` | undo the last change |
-| `:w` | write every change to the keyboard |
-| `:wq`, `:q`, `:q!`, `:e!` | write and quit, quit, quit without writing, discard changes |
-| `?` | every key, for the screen you are on |
+| `u` (or `:u`, `:undo`) | undo the last change |
+| `:w` | write every change: to the keyboard, to the keymap file, or to both when they are linked |
+| `:wq` (or `:x`), `:q`, `:q!`, `:e!` (or `:discard`) | write and quit, quit, quit without writing, discard changes |
+| `?` (or `:help`) | every key, for the screen you are on |
 | `space` or `ctrl-k` | find anything: run a command, go to a layer or tab, or find a key on any layer by name. `:` opens the same list showing only commands |
 | `:layer-add`, `:layer-remove`, `:layer-rename Sym`, `:layer-left`, `:layer-right` | add a layer, remove this one, name it, or move it one place (ZMK Studio and keymap files) |
 | `:layout`, `:layout 1` | list a ZMK board's physical layouts, or switch to one; the keyboard is read again |
-| `:e config/corne.keymap` | on a ZMK Studio keyboard: link the keymap file (or zmk-config folder) it runs, so `:w` writes both; the board is read again from the file |
+| `:e config/corne.keymap` (or `:edit`) | on a ZMK Studio keyboard: link the keymap file (or zmk-config folder) it runs, so `:w` writes both; the board is read again from the file |
 | `:export`, `:export light`, `:export dark ~/corne.svg` | tick the layers to draw (all start ticked; `space` or a click ticks one, `a` all or none), then `enter` saves them as one SVG image, dark or light, at the path or as `<board>-keymap-<theme>.svg` in the current folder; unsaved changes are drawn as staged |
 
 The mouse works too. What a click would act on lights up under the pointer. Click a key, a tab, a cell, a board, or a hint in the bottom bar to select it; click what is already selected to do what Enter does there (open the key list, edit the cell, open the board). In the key list one click shows the keycode on the key in amber and a second click stages it, so a stray click changes nothing; clicking another key on the board moves the list to that key. The wheel changes layer over the board and scrolls a list under it; right-click is `esc`. Hold Shift (Option in some macOS terminals) to select text as usual.
@@ -111,14 +111,15 @@ MIT. See [LICENSE](LICENSE). The keycode table is generated by `scripts/keycodes
 ## Releasing
 
 1. Bump `version` in `Cargo.toml`, commit, and push `main`.
-2. Tag it and hash the tarball GitHub serves for the tag:
+2. Tag it and hash the tarball GitHub serves for the tag (`X.Y.Z` is the new version):
 
    ```sh
-   git tag -a v0.2.0 -m "lazykeymap 0.2.0" && git push origin v0.2.0
-   curl -sL https://github.com/imjma/lazykeymap/archive/refs/tags/v0.2.0.tar.gz | shasum -a 256
+   git tag -a vX.Y.Z -m "lazykeymap X.Y.Z" && git push origin vX.Y.Z
+   curl -sL https://github.com/imjma/lazykeymap/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
    ```
 
 3. Put the new `url` and `sha256` in `Formula/lazykeymap.rb`, and the new tag in the Arch section's `cargo install` line above, then commit and push `main`.
+4. Check it: `cargo run -q -- --version` prints the new version, and `ruby -c Formula/lazykeymap.rb` passes.
 
 The AUR follows by itself: pushing the tag runs `.github/workflows/aur.yml`, which sets `pkgver` in `aur/PKGBUILD`, hashes the tag's tarball, builds the package in Arch, writes `.SRCINFO`, and pushes it to the AUR. Edit anything else about the package in `aur/PKGBUILD`. To publish a tag again, run the workflow by hand (Actions, aur, Run workflow) with that tag.
 
