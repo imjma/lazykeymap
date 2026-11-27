@@ -1103,6 +1103,7 @@ impl Model {
                 }
             }
             Cmd::Layout => return self.switch_layout(session, back, arg),
+            Cmd::Open => return self.open_file(session, back, arg),
         }
         self.kind = back_to(session, back);
         Ok(Step::Continue)
@@ -1125,6 +1126,35 @@ impl Model {
             self.kind = back_to(session, back);
             return Ok(Step::Continue);
         }
+        self.reread(session, land)
+    }
+
+    /// `:e config/corne.keymap` on a ZMK Studio keyboard: link the keymap file it runs, so `:w`
+    /// writes both, and read the board again from the file. A file it does not run says where.
+    fn open_file(
+        &mut self,
+        mut session: Session<Mapping>,
+        back: Option<vial::Spot>,
+        arg: &str,
+    ) -> Result<Step> {
+        if arg.is_empty() {
+            self.notice =
+                Some("name a keymap file or zmk-config: :e config/corne.keymap".to_string());
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        // `~/zmk-config` as a shell would read it.
+        let path = match (arg.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => std::path::Path::new(&home).join(rest),
+            _ => std::path::PathBuf::from(arg),
+        };
+        if let Err(why) = session.board.link_file(&path) {
+            self.notice = Some(why);
+            self.kind = back_to(session, back);
+            return Ok(Step::Continue);
+        }
+        self.notice = Some(format!("linked {}: :w writes both", path.display()));
+        let land = session.layer;
         self.reread(session, land)
     }
 
@@ -2970,11 +3000,12 @@ enum Cmd {
     Layout,
     RowAdd,
     RowRemove,
+    Open,
 }
 
 /// Every `:` command: its names (Tab fills in the first), and what it does.
 /// The `:` rows of the find-anything list and its `run` group both read this.
-const COMMANDS: [(Cmd, &[&str], &str); 15] = [
+const COMMANDS: [(Cmd, &[&str], &str); 16] = [
     (
         Cmd::Write,
         &["w", "write"],
@@ -3025,6 +3056,11 @@ const COMMANDS: [(Cmd, &[&str], &str); 15] = [
         Cmd::RowRemove,
         &["remove"],
         "on a keymap file's tab: remove this row",
+    ),
+    (
+        Cmd::Open,
+        &["e", "edit"],
+        "link the keymap file this ZMK keyboard runs: :e config/corne.keymap",
     ),
 ];
 

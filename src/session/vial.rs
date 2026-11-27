@@ -605,9 +605,7 @@ fn link_with(files: &mut [Candidate], mut boards: Vec<Candidate>) {
                 Ok(both) => {
                     file.io = Some(Box::new(both));
                     file.guard = boards.remove(at).guard;
-                    file.listing.name = format!("{} + {board}", file.listing.name);
-                    file.listing.maker = "keymap file and keyboard".to_string();
-                    file.listing.serial.clear();
+                    file.listing = Box::new(linked_listing(&file.listing, &board));
                     break;
                 }
                 Err((why, mine, its)) => {
@@ -618,6 +616,16 @@ fn link_with(files: &mut [Candidate], mut boards: Vec<Candidate>) {
                 }
             }
         }
+    }
+}
+
+/// What a linked file and keyboard show: `corne + Corne`, at the file's path.
+fn linked_listing(file: &Listing, board: &str) -> Listing {
+    Listing {
+        name: format!("{} + {board}", file.name),
+        maker: "keymap file and keyboard".to_string(),
+        usb: file.usb.clone(),
+        serial: String::new(),
     }
 }
 
@@ -1218,6 +1226,37 @@ impl Board {
             ));
         }
         self.io.set_layout(index)
+    }
+
+    /// Links this ZMK Studio keyboard to the keymap file at `path` when it runs that keymap, so
+    /// `:w` writes both; read the board again after. Otherwise the board stays as it was, and
+    /// the error says why: where the two differ, or what the file or folder lacks.
+    pub(super) fn link_file(&mut self, path: &std::path::Path) -> std::result::Result<(), String> {
+        if !self.pending().is_empty() {
+            return Err("write or discard the changes first (:w or :e!)".to_string());
+        }
+        // A Vial board has no keymap list; a file, or a board already linked, writes elsewhere.
+        if self.io.writes_to() != "the keyboard" || self.io.keymap().is_empty() {
+            return Err("only a ZMK Studio keyboard links to a keymap file".to_string());
+        }
+        let mut files = file::candidates(path).map_err(|err| err.to_string())?;
+        if files.len() != 1 {
+            return Err(format!("that folder has {} keymaps: name one", files.len()));
+        }
+        let mut file = files.remove(0);
+        let mine = file.io.take().ok_or("the file is closed")?;
+        let its = std::mem::replace(&mut self.io, Box::new(Closed));
+        match linked::link(mine, its) {
+            Ok(both) => {
+                self.io = Box::new(both);
+                self.listing = linked_listing(&file.listing, &self.listing.name);
+                Ok(())
+            }
+            Err((why, _, its)) => {
+                self.io = its;
+                Err(format!("not linked: {why}"))
+            }
+        }
     }
 
     /// This keyboard as a candidate to read again, still open. The board is left with nothing.

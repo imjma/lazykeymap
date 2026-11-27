@@ -2485,6 +2485,39 @@ mod tests {
     }
 
     #[test]
+    fn e_links_the_open_keyboard_to_the_keymap_file_it_runs() {
+        let fw = linked_firmware();
+        let dir = std::env::temp_dir().join(format!("lazykeymap-e-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("other.keymap");
+        std::fs::write(&other, LINKED_KEYMAP.replace("&kp Y", "&kp Q")).unwrap();
+        let corne = dir.join("corne.keymap");
+        std::fs::write(&corne, LINKED_KEYMAP).unwrap();
+        let mut model = crate::session::Model::start(crate::session::Attached {
+            kind: crate::session::Kind::Ready(crate::session::Session::mapped(open(&fw).unwrap())),
+        });
+        // A file the keyboard does not run says where, and the board stays as it was.
+        let text = command(&mut model, &format!("e {}", other.display()));
+        assert!(text.contains("not linked: layer 1 key 2"), "{text}");
+        // The one it runs links: the header names both, and `:w` writes both.
+        let text = command(&mut model, &format!("e {}", corne.display()));
+        assert!(text.contains("corne + "), "{text}");
+        let crate::session::ModelKind::Map(session) = &mut model.kind else {
+            panic!("not on the board");
+        };
+        session.board.stage(Write::Key {
+            layer: 1,
+            place: Place::Matrix { row: 0, col: 1 },
+            code: 0x14,
+        });
+        let text = command(&mut model, "w");
+        assert!(text.contains("the file and the keyboard"), "{text}");
+        assert_eq!(fw.borrow().layers[1].1[1], bind(KP, key(0x14), 0));
+        let file = std::fs::read_to_string(&corne).unwrap();
+        assert!(file.contains("&trans &kp Q &kp Y &kp Z"), "{file}");
+    }
+
+    #[test]
     fn a_locked_board_says_how_to_unlock() {
         let fw = firmware();
         fw.borrow_mut().locked = true;

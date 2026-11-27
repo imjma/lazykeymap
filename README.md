@@ -38,6 +38,7 @@ Plug in a Vial keyboard, or connect a ZMK keyboard built with Studio support by 
 | `space` or `ctrl-k` | find anything: run a command, go to a layer or tab, or find a key on any layer by name. `:` opens the same list showing only commands |
 | `:layer-add`, `:layer-remove`, `:layer-rename Sym`, `:layer-left`, `:layer-right` | add a layer, remove this one, name it, or move it one place (ZMK Studio and keymap files) |
 | `:layout`, `:layout 1` | list a ZMK board's physical layouts, or switch to one; the keyboard is read again |
+| `:e config/corne.keymap` | on a ZMK Studio keyboard: link the keymap file (or zmk-config folder) it runs, so `:w` writes both; the board is read again from the file |
 
 The mouse works too. What a click would act on lights up under the pointer. Click a key, a tab, a cell, a board, or a hint in the bottom bar to select it; click what is already selected to do what Enter does there (open the key list, edit the cell, open the board). In the key list one click shows the keycode on the key in amber and a second click stages it, so a stray click changes nothing; clicking another key on the board moves the list to that key. The wheel changes layer over the board and scrolls a list under it; right-click is `esc`. Hold Shift (Option in some macOS terminals) to select text as usual.
 
@@ -61,6 +62,8 @@ lazykeymap talks to ZMK the way [ZMK Studio](https://github.com/zmkfirmware/zmk-
 `lazykeymap config/corne.keymap` edits the file the way [Keymap Editor](https://github.com/nickcoutsos/keymap-editor) does, in the terminal: `:w` writes the file, and you build and flash as usual. Only the bytes of what changed are rewritten: comments, `#define`s, and the grid the layers are written in stay as they are, and a binding that grows widens its column.
 
 With the ZMK Studio keyboard that runs this keymap connected (USB or Bluetooth), lazykeymap links the two: the screen shows the file, and `:w` writes each key to the keyboard first, then to the file, so the keyboard changes now and the file stays the source for your next build. They link when the keyboard holds the same keymap: the same layers, the same keys, and at every key the same binding (a behavior the file calls `&hm` and Studio calls by its display name is matched up from the keymap itself). The card then reads `corne + Corne`. When they differ, the card says where (`not linked to Corne: layer 1 key 2: the file has &kp Q, the keyboard &kp Y`) and only the file is edited. Combos, macros, and behaviors are written to the file only, since Studio cannot change them; flash to get them onto the keyboard.
+
+Already in a ZMK Studio keyboard? `:e ~/zmk-config/config/corne.keymap` does the same from inside: it compares, links, and reads the board again from the file, or says where they differ and leaves the board as it was. Write or discard unsaved changes first.
 
 - The layout is drawn from `config/<keyboard>.json` or `config/info.json` (Keymap Editor's layout file, QMK `info.json` keys), else from how the first layer's bindings are laid out in the file.
 - Keys show and edit as on a Studio board: each key is its binding, behavior over parameters, and Enter opens it in columns, one per part. A cell on the Combos, Macros, Behaviors, Conditional, or Encoders tab that holds a binding edits the same way.
