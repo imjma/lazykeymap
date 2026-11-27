@@ -157,6 +157,21 @@ impl Io for FileIo {
             .collect()
     }
 
+    fn keymap(&self) -> Vec<Vec<u16>> {
+        let Some(doc) = &self.doc else {
+            return Vec::new();
+        };
+        layers(doc)
+            .iter()
+            .map(|layer| {
+                binding_texts(doc, layer.prop("bindings"))
+                    .iter()
+                    .map(|(_, tokens)| self.code_of(doc, tokens).unwrap_or(0))
+                    .collect()
+            })
+            .collect()
+    }
+
     fn edit_layers(&mut self, op: &LayerOp) -> Result<()> {
         let doc = self
             .doc
@@ -259,12 +274,8 @@ impl FileIo {
             ),
             Ask::MacroCount => Reply::MacroCount(0),
             Ask::KeymapChunk { offset, len } => {
-                let doc = self.doc()?;
-                let codes: Vec<u16> = layers(doc)
-                    .iter()
-                    .flat_map(|layer| binding_texts(doc, layer.prop("bindings")))
-                    .map(|(_, tokens)| self.code_of(doc, &tokens).unwrap_or(0))
-                    .collect();
+                self.doc()?;
+                let codes: Vec<u16> = self.keymap().concat();
                 let bytes = keymap_bytes(&codes);
                 let start = usize::from(offset).min(bytes.len());
                 let end = (start + usize::from(len)).min(bytes.len());

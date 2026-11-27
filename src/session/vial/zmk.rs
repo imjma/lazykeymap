@@ -545,6 +545,19 @@ impl Io for Zmk {
         self.layers.iter().map(|l| l.name.clone()).collect()
     }
 
+    fn keymap(&self) -> Vec<Vec<u16>> {
+        self.layers
+            .iter()
+            .map(|layer| {
+                layer
+                    .bindings
+                    .iter()
+                    .map(|binding| self.code(*binding).unwrap_or(0))
+                    .collect()
+            })
+            .collect()
+    }
+
     fn edit_layers(&mut self, op: &LayerOp) -> Result<()> {
         let done = self.layer_call(op);
         // Read again from the lock, whether the call worked or not.
@@ -650,12 +663,7 @@ impl Zmk {
             ),
             Ask::MacroCount => Reply::MacroCount(0),
             Ask::KeymapChunk { offset, len } => {
-                let codes: Vec<u16> = self
-                    .layers
-                    .iter()
-                    .flat_map(|layer| &layer.bindings)
-                    .map(|binding| self.code(*binding).unwrap_or(0))
-                    .collect();
+                let codes: Vec<u16> = self.keymap().concat();
                 let bytes = keymap_bytes(&codes);
                 let start = usize::from(offset).min(bytes.len());
                 let end = (start + usize::from(len)).min(bytes.len());
@@ -2377,6 +2385,103 @@ mod tests {
         assert_eq!(fw.borrow().saves, 1);
         drop(board);
         assert_eq!(at(&open(&fw).unwrap(), 1, 0), 0x5221);
+    }
+
+    /// `firmware()`'s keymap as a zmk-config writes it: the hold-tap by its node label `hm`,
+    /// which Studio reports by its display name.
+    const LINKED_KEYMAP: &str = r#"
+/ {
+    behaviors {
+        hm: homerow_mods {
+            compatible = "zmk,behavior-hold-tap";
+            #binding-cells = <2>;
+            bindings = <&kp>, <&kp>;
+        };
+    };
+    keymap {
+        compatible = "zmk,keymap";
+        base { bindings = <&kp A &mt LSHIFT B &mo 1 &hm LGUI C>; };
+        upper { bindings = <&trans &kp X &kp Y &kp Z>; };
+    };
+};
+"#;
+
+    fn linked(fw: &Rc<RefCell<Firmware>>, name: &str, keymap: &str) -> Candidate {
+        let dir =
+            std::env::temp_dir().join(format!("lazykeymap-link-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("corne.keymap");
+        std::fs::write(&path, keymap).unwrap();
+        let mut files = super::super::file_candidates(&path).unwrap();
+        let board = Candidate {
+            listing: Box::new(super::super::Listing {
+                name: "Corne".to_string(),
+                ..Default::default()
+            }),
+            io: Some(Box::new(Zmk::new(Box::new(Fake(Rc::clone(fw)))))),
+            guard: None,
+        };
+        super::super::link_with(&mut files, vec![board]);
+        files.remove(0)
+    }
+
+    fn linked_firmware() -> Rc<RefCell<Firmware>> {
+        let fw = firmware();
+        fw.borrow_mut().layers[1].1 = vec![
+            bind(TRANS, 0, 0),
+            bind(KP, key(0x1B), 0),
+            bind(KP, key(0x1C), 0),
+            bind(KP, key(0x1D), 0),
+        ];
+        fw
+    }
+
+    #[test]
+    fn a_keymap_file_the_keyboard_runs_writes_to_both() {
+        let fw = linked_firmware();
+        let file = linked(&fw, "both", LINKED_KEYMAP);
+        assert_eq!(file.listing.name, "corne + Corne");
+        let path = std::path::PathBuf::from(&file.listing.usb);
+        let mut board = load(file).unwrap();
+        // A key, and the hold-tap under its file label, which the keyboard knows by another name.
+        let hm = board.intern("&hm LCTRL D").unwrap();
+        for (col, code) in [(0, 0x1D), (3, hm)] {
+            let write = Write::Key {
+                layer: 0,
+                place: Place::Matrix { row: 0, col },
+                code,
+            };
+            assert!(matches!(board.commit(&write), Ok(Commit::Stored)));
+        }
+        assert_eq!(fw.borrow().layers[0].1[0], bind(KP, key(0x1D), 0));
+        assert_eq!(fw.borrow().layers[0].1[3], bind(HM, key(0xE0), key(0x07)));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("&kp Z  &mt LSHIFT B  &mo 1  &hm LCTRL D"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_keymap_file_the_keyboard_does_not_run_says_why_and_edits_the_file_alone() {
+        let fw = linked_firmware();
+        let file = linked(&fw, "differs", &LINKED_KEYMAP.replace("&kp Y", "&kp Q"));
+        assert_eq!(file.listing.name, "corne");
+        assert!(
+            file.listing
+                .serial
+                .contains("not linked to Corne: layer 1 key 2"),
+            "{}",
+            file.listing.serial
+        );
+        let mut board = load(file).unwrap();
+        let write = Write::Key {
+            layer: 0,
+            place: Place::Matrix { row: 0, col: 0 },
+            code: 0x1D,
+        };
+        assert!(matches!(board.commit(&write), Ok(Commit::Stored)));
+        assert_eq!(fw.borrow().layers[0].1[0], bind(KP, key(0x04), 0));
     }
 
     #[test]

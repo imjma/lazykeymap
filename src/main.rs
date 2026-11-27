@@ -155,7 +155,13 @@ enum Source<'a> {
 
 fn run(source: Source<'_>) -> lazykeymap::Result<()> {
     let attached = match source {
-        Source::File(path) => lazykeymap::attach_file(std::path::Path::new(path))?,
+        Source::File(path) => {
+            // A ZMK Studio keyboard running this keymap is read whole, to compare and link it.
+            eprint!("looking for a ZMK keyboard running this keymap…");
+            let attached = lazykeymap::attach_file(std::path::Path::new(path));
+            eprint!("\r\x1b[K");
+            attached?
+        }
         Source::Connected(port) => {
             // Asking each HID device for its Vial id can take a moment over Bluetooth, and each
             // USB serial port and Bluetooth keyboard gets a short wait for a ZMK Studio answer.

@@ -16,6 +16,7 @@ pub(super) use layout::{
 mod dts;
 mod file;
 mod layout;
+mod linked;
 mod sections;
 mod zmk;
 mod zmk_keys;
@@ -44,6 +45,12 @@ trait Io {
 
     /// Each layer's name, in layer order, where the keyboard names them. Vial does not.
     fn layer_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Each layer's keycodes, in key order. A Studio board and a keymap file have them as lists;
+    /// a Vial board answers only in report chunks.
+    fn keymap(&self) -> Vec<Vec<u16>> {
         Vec::new()
     }
 
@@ -577,6 +584,41 @@ pub(super) fn enumerate() -> Result<Vec<Candidate>> {
     }
     found.extend(zmk::enumerate());
     Ok(found)
+}
+
+/// Pairs each keymap file with the connected ZMK Studio keyboard that runs it, so a change goes
+/// to both. A file that no keyboard matches says why on its card and edits the file alone.
+pub(super) fn link_files(files: &mut [Candidate]) {
+    link_with(files, zmk::enumerate());
+}
+
+fn link_with(files: &mut [Candidate], mut boards: Vec<Candidate>) {
+    for file in files.iter_mut() {
+        let mut at = 0;
+        while at < boards.len() {
+            let (Some(mine), Some(its)) = (file.io.take(), boards[at].io.take()) else {
+                at += 1;
+                continue;
+            };
+            let board = boards[at].listing.name.clone();
+            match linked::link(mine, its) {
+                Ok(both) => {
+                    file.io = Some(Box::new(both));
+                    file.guard = boards.remove(at).guard;
+                    file.listing.name = format!("{} + {board}", file.listing.name);
+                    file.listing.maker = "keymap file and keyboard".to_string();
+                    file.listing.serial.clear();
+                    break;
+                }
+                Err((why, mine, its)) => {
+                    file.io = Some(mine);
+                    boards[at].io = Some(its);
+                    file.listing.serial = format!("not linked to {board}: {why}");
+                    at += 1;
+                }
+            }
+        }
+    }
 }
 
 /// Reads the whole board at once. Sets `Store.open` when the `Io` is a fake.

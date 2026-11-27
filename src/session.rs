@@ -573,9 +573,11 @@ pub fn attach_port(path: &str) -> Result<Attached> {
 }
 
 /// A ZMK `.keymap` file, read and ready to edit; or a zmk-config folder: its one keymap, or
-/// the choose screen when it has several. `:w` writes the file.
+/// the choose screen when it has several. `:w` writes the file, and the connected ZMK Studio
+/// keyboard too when it holds the same keymap.
 pub fn attach_file(path: &std::path::Path) -> Result<Attached> {
-    let candidates = vial::file_candidates(path)?;
+    let mut candidates = vial::file_candidates(path)?;
+    vial::link_files(&mut candidates);
     if candidates.len() == 1 {
         fan_in(candidates)
     } else {
