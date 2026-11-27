@@ -216,8 +216,9 @@ pub(in crate::session) fn zones(frame: &str, hover: Option<&Hit>) -> (String, Ve
     (text, zones)
 }
 
-/// The hover look over `style`: its background a step lighter, or, with no background of its
-/// own, an underline.
+/// The hover look over `style`: its background a step lighter, so a key or chip rises; text
+/// with no background of its own gets a key face a step lighter, so whatever is hovered reads
+/// as one chip.
 fn lift(style: &str) -> String {
     let body = style
         .strip_prefix("\u{1b}[")
@@ -235,7 +236,9 @@ fn lift(style: &str) -> String {
         match parts[i].as_str() {
             "48" if rgb => {
                 for part in &mut parts[i + 2..=i + 4] {
-                    *part = (part.parse::<u16>().unwrap_or(0) + 28).min(255).to_string();
+                    *part = (part.parse::<u16>().unwrap_or(0) + LIFT)
+                        .min(255)
+                        .to_string();
                 }
                 lit = true;
                 i += 5;
@@ -245,10 +248,15 @@ fn lift(style: &str) -> String {
         }
     }
     if !lit {
-        parts.push("4".to_string());
+        let face = [KEY_FACE.0, KEY_FACE.1, KEY_FACE.2].map(|c| (u16::from(c) + LIFT).to_string());
+        parts.extend(["48".to_string(), "2".to_string()]);
+        parts.extend(face);
     }
     format!("\u{1b}[{}m", parts.join(";"))
 }
+
+/// How much lighter a hovered background is, per channel.
+const LIFT: u16 = 28;
 
 /// What is under `(col, row)`, innermost first: a key before the lower panel around it.
 pub(in crate::session) fn hits_at(zones: &[Zone], col: u16, row: u16) -> Vec<&Hit> {
