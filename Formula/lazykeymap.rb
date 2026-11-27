@@ -1,8 +1,8 @@
 class Lazykeymap < Formula
   desc "Remap a Vial or ZMK keyboard, or a ZMK keymap file, from the terminal"
   homepage "https://github.com/imjma/lazykeymap"
-  url "https://github.com/imjma/lazykeymap/archive/refs/tags/v0.5.0.tar.gz"
-  sha256 "2294762788d71436aef78dbfec2484f7e85527aae5d7372b028d0b06156e5e9c"
+  url "https://github.com/imjma/lazykeymap/archive/refs/tags/v0.6.0.tar.gz"
+  sha256 "75e78420d5e87cfda1988a51322606733a324656aa39db8ff224effc0442ffcc"
   license "MIT"
   head "https://github.com/imjma/lazykeymap.git", branch: "main"
 
